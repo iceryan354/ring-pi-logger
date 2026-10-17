@@ -1,0 +1,711 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0c0a09">
+<title>Ring PI Logger</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Red+Hat+Mono:wght@400;500&family=Red+Hat+Text:wght@400;500;700&display=swap">
+<style>
+/* Layout: one bedside column. Live PI first, then SpO2/pulse, the night's trend, controls, saved recordings.
+   Deliberately dark-only with warm, low-blue colours: it is meant to sit lit beside a bed all night. */
+:root{
+  --bg:#0c0a09;
+  --panel:#15110e;
+  --line:#2b231d;
+  --fg:#eadbcc;
+  --muted:#9b8a7b;
+  --accent:#ff8d52;
+  --ok:#93bf7f;
+  --warn:#e2b14f;
+  --bad:#e3675c;
+  --font-ui:"Red Hat Text",-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  --font-num:"Red Hat Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html{background:var(--bg)}
+body{
+  margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 var(--font-ui);
+  padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
+  -webkit-text-size-adjust:100%;
+}
+[hidden]{display:none!important}
+.wrap{
+  max-width:560px;margin:0 auto;
+  padding-block:14px 40px;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  display:flex;flex-direction:column;gap:18px;
+}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+h1{font-size:16px;font-weight:700;letter-spacing:.02em;margin:0}
+.pill{
+  display:inline-flex;align-items:center;gap:7px;padding:4px 10px;border-radius:999px;
+  border:1px solid var(--line);font-size:13px;color:var(--muted);white-space:nowrap;
+}
+.pill::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--muted)}
+.pill[data-state="live"]{color:var(--ok)} .pill[data-state="live"]::before{background:var(--ok)}
+.pill[data-state="connecting"],.pill[data-state="reconnecting"]{color:var(--warn)}
+.pill[data-state="connecting"]::before,.pill[data-state="reconnecting"]::before{background:var(--warn)}
+.pill[data-state="error"]{color:var(--bad)} .pill[data-state="error"]::before{background:var(--bad)}
+.pill[data-state="demo"]{color:var(--accent)} .pill[data-state="demo"]::before{background:var(--accent)}
+.clock{font:500 13px var(--font-num);color:var(--muted);font-variant-numeric:tabular-nums}
+
+.banner{border:1px solid var(--warn);color:var(--warn);border-radius:10px;padding:10px 12px;font-size:14px}
+.banner b{color:var(--fg)}
+
+.hero{display:flex;flex-direction:column;gap:2px}
+.label{font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
+.pi-row{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.pi{font:500 clamp(64px,22vw,112px)/1 var(--font-num);color:var(--accent);font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.pi-unit{font:500 22px var(--font-num);color:var(--accent)}
+.pi-raw{font:400 13px var(--font-num);color:var(--muted);margin-left:auto}
+.finger{font-size:14px;color:var(--muted)}
+.finger[data-on="1"]{color:var(--ok)}
+.finger[data-on="0"]{color:var(--warn)}
+
+.vitals{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.vital{background:var(--panel);padding:10px 10px 9px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.vital .v{font:500 24px/1.1 var(--font-num);font-variant-numeric:tabular-nums}
+.vital .u{font-size:12px;color:var(--muted)}
+@media (max-width:380px){.vitals{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+.trend{display:flex;flex-direction:column;gap:6px}
+.trend-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
+canvas{width:100%;height:150px;display:block;background:var(--panel);border:1px solid var(--line);border-radius:12px}
+.stats{font:400 13px var(--font-num);color:var(--muted);font-variant-numeric:tabular-nums}
+
+.controls{display:flex;flex-wrap:wrap;gap:10px}
+button{
+  font:500 15px var(--font-ui);color:var(--fg);background:var(--panel);
+  border:1px solid var(--line);border-radius:10px;padding:11px 16px;cursor:pointer;
+  -webkit-tap-highlight-color:transparent;
+}
+button:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button:disabled{opacity:.4;cursor:default}
+button.primary{background:var(--accent);border-color:var(--accent);color:#1a0d05;font-weight:700}
+button.small{padding:7px 11px;font-size:13px}
+button.danger{color:var(--bad)}
+.link{background:none;border:none;padding:4px 0;color:var(--muted);text-decoration:underline;font-size:13px}
+
+.settings{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.field{display:flex;flex-direction:column;gap:5px;min-width:0}
+select{
+  font:15px var(--font-ui);color:var(--fg);background:var(--panel);border:1px solid var(--line);
+  border-radius:10px;padding:9px 10px;width:100%;
+}
+.hint{font-size:12px;color:var(--muted)}
+
+section{display:flex;flex-direction:column;gap:10px}
+h2{font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin:0;font-weight:500}
+.toast{font-size:13px;color:var(--ok);min-height:1.2em}
+
+.sessions{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}
+.sessions li{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.sessions .meta{flex:1 1 200px;min-width:0}
+.sessions .when{font-weight:500}
+.sessions .sub{font:400 12px var(--font-num);color:var(--muted)}
+.sessions .acts{display:flex;gap:8px}
+.empty{color:var(--muted);font-size:14px;padding:10px 0;border-bottom:1px solid var(--line)}
+
+ol.check{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:4px;color:var(--fg)}
+ol.check li::marker{color:var(--muted);font-family:var(--font-num)}
+
+details{border:1px solid var(--line);border-radius:10px;padding:8px 12px}
+summary{cursor:pointer;color:var(--muted);font-size:14px}
+pre.log{font:12px/1.5 var(--font-num);color:var(--muted);white-space:pre-wrap;word-break:break-all;margin:8px 0 0;max-height:260px;overflow:auto}
+
+textarea{width:100%;height:160px;font:12px var(--font-num);color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px}
+
+/* Dim mode: near-black screen with a faint PI readout, so the phone stays awake without lighting the room. */
+#dim{position:fixed;inset:0;background:#000;z-index:50;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;cursor:pointer}
+#dim .d-pi{font:500 44px var(--font-num);color:#5a1d10;font-variant-numeric:tabular-nums}
+#dim .d-sub{font:400 13px var(--font-num);color:#3a150c}
+@media (prefers-reduced-motion:no-preference){.pi{transition:color .3s}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Ring PI Logger</h1>
+    <span class="pill" id="state" data-state="idle">Not connected</span>
+    <span class="clock" id="elapsed">00:00:00</span>
+  </header>
+
+  <div class="banner" id="nobt" hidden>
+    This browser can't use Bluetooth. On iPhone, open this page in <b>Bluefy</b>. On a computer, Chrome or Edge work. You can still try <b>Demo</b> below.
+  </div>
+
+  <div class="hero">
+    <span class="label">Perfusion index</span>
+    <div class="pi-row">
+      <span class="pi" id="pi">—</span><span class="pi-unit" id="piUnit">%</span>
+      <span class="pi-raw" id="piRaw">raw —</span>
+    </div>
+    <span class="finger" id="finger">Waiting for the ring</span>
+  </div>
+
+  <div class="vitals">
+    <div class="vital"><span class="label">SpO₂</span><span class="v" id="spo2">—</span><span class="u">%</span></div>
+    <div class="vital"><span class="label">Pulse</span><span class="v" id="hr">—</span><span class="u">bpm</span></div>
+    <div class="vital"><span class="label">Motion</span><span class="v" id="mot">—</span><span class="u">ring sensor</span></div>
+    <div class="vital"><span class="label">Battery</span><span class="v" id="bat">—</span><span class="u">%</span></div>
+  </div>
+
+  <div class="trend">
+    <div class="trend-head">
+      <span class="label">PI this recording</span>
+      <span class="stats" id="stats">no readings yet</span>
+    </div>
+    <canvas id="chart" aria-label="Perfusion index over this recording"></canvas>
+  </div>
+
+  <div class="controls">
+    <button class="primary" id="btnConnect">Connect ring</button>
+    <button id="btnStop" disabled>Stop</button>
+    <button id="btnDim">Dim screen</button>
+    <button id="btnDemo">Demo</button>
+  </div>
+  <button class="link" id="btnAll" type="button">Ring not in the list? Show all nearby devices</button>
+
+  <div class="settings">
+    <div class="field">
+      <label class="label" for="selPoll">Read every</label>
+      <select id="selPoll">
+        <option value="1000">1 second</option>
+        <option value="2000" selected>2 seconds</option>
+        <option value="4000">4 seconds</option>
+      </select>
+    </div>
+    <div class="field">
+      <label class="label" for="selDiv">PI units</label>
+      <select id="selDiv">
+        <option value="10" selected>Raw ÷ 10 = %</option>
+        <option value="1">Raw = %</option>
+      </select>
+    </div>
+    <span class="hint" style="grid-column:1/-1">The ring's PI scaling isn't documented. The CSV always keeps the raw number, so you can change this later. Check it once against an oximeter that shows PI.</span>
+  </div>
+
+  <section>
+    <h2>This recording</h2>
+    <div class="controls">
+      <button id="btnSave" disabled>Save CSV</button>
+      <button id="btnCopy" disabled>Copy CSV</button>
+      <button id="btnText" disabled>Show as text</button>
+    </div>
+    <div class="toast" id="toast" role="status"></div>
+    <textarea id="csvText" hidden readonly aria-label="CSV text"></textarea>
+  </section>
+
+  <section>
+    <h2>Saved recordings on this phone</h2>
+    <ul class="sessions" id="sessions"></ul>
+  </section>
+
+  <section>
+    <h2>Before you sleep</h2>
+    <ol class="check">
+      <li>Fully close ViHealth so the ring is free to connect.</li>
+      <li>Plug the phone in.</li>
+      <li>Open this page in Bluefy, tap <b>Connect ring</b> and pick your ring.</li>
+      <li>Leave Bluefy open and tap <b>Dim screen</b>. If the phone still locks, set Auto-Lock to Never for the night.</li>
+      <li>In the morning tap <b>Stop</b>, then <b>Save CSV</b>.</li>
+    </ol>
+    <span class="hint">Readings are saved on the phone as they arrive, so a reload or crash loses at most the last reading. If the link drops, the page reconnects on its own.</span>
+  </section>
+
+  <details id="logBox">
+    <summary>Connection log</summary>
+    <pre class="log" id="log"></pre>
+    <div class="controls" style="margin-top:8px"><button class="small" id="btnCopyLog">Copy log</button></div>
+  </details>
+</div>
+
+<div id="dim" hidden role="button" aria-label="Tap to wake the screen">
+  <span class="d-pi" id="dimPi">—</span>
+  <span class="d-sub" id="dimSub">tap to wake</span>
+</div>
+
+<script>
+'use strict';
+/* ---------- Ring protocol (Viatom / Wellue O2 family) ----------
+   Service and request bytes follow ecostech/viatom-ble (MIT).
+   Request 0x17 = "real-time reading". Each reply notification holds:
+   [7] SpO2  [8] pulse  [14] battery  [16] motion  [17] PI (raw)  [18] on-finger flag
+   Frame: 55 cmd ~cmd seq seq lenLo lenHi payload… crc8(poly 0x07). */
+const SVC = '14839ac4-7d7e-415c-9a42-167340cf2339';
+const WRITE_PREFIX = '8b00ace7';
+const REQUEST = new Uint8Array([0xAA, 0x17, 0xE8, 0x00, 0x00, 0x00, 0x00, 0x1B]);
+const FILTERS = [
+  {services: [SVC]}, {namePrefix: 'O2'}, {namePrefix: 'Checkme'}, {namePrefix: 'Wellue'},
+  {namePrefix: 'Viatom'}, {namePrefix: 'SleepU'}, {namePrefix: 'OxyRing'}, {namePrefix: 'PO'}
+];
+
+function crc8(bytes, end) {
+  let c = 0;
+  for (let i = 0; i < end; i++) {
+    c ^= bytes[i];
+    for (let k = 0; k < 8; k++) c = (c & 0x80) ? ((c << 1) ^ 0x07) & 0xFF : (c << 1) & 0xFF;
+  }
+  return c;
+}
+function toHex(b) { let s = ''; for (const x of b) s += x.toString(16).padStart(2, '0'); return s; }
+
+/* Returns a reading object, or null if the bytes are too short. */
+function parsePacket(b) {
+  if (!b || b.length < 19) return null;
+  const worn = b[18] !== 0;
+  const spo2 = b[7], hr = b[8];
+  const calibrating = worn && spo2 === 0 && hr === 0;
+  const valid = worn && !calibrating && spo2 > 0 && spo2 <= 100 && hr > 0 && hr < 255;
+  let crcOk = null;
+  if (b.length >= 8 && b[0] === 0x55) {
+    const total = 8 + (b[5] | (b[6] << 8));
+    if (b.length >= total) crcOk = crc8(b, total - 1) === b[total - 1];
+  }
+  return {
+    t: Date.now(),
+    s: valid ? spo2 : null,
+    h: valid ? hr : null,
+    p: valid ? b[17] : null,
+    m: b[16], b: b[14], w: worn ? 1 : 0, c: calibrating ? 1 : 0,
+    x: toHex(b), crcOk
+  };
+}
+
+/* Some links split one reply over two notifications; stitch them. */
+const assembler = {
+  buf: null, at: 0,
+  push(bytes) {
+    if (bytes.length >= 19) { this.buf = null; return parsePacket(bytes); }
+    if (bytes[0] === 0x55) { this.buf = Array.from(bytes); this.at = Date.now(); return null; }
+    if (this.buf && Date.now() - this.at < 1500) {
+      for (const x of bytes) this.buf.push(x);
+      if (this.buf.length >= 19) { const whole = Uint8Array.from(this.buf); this.buf = null; return parsePacket(whole); }
+    }
+    return null; // stray tail, e.g. a lone checksum byte
+  }
+};
+
+/* ---------- Small helpers ---------- */
+const $ = id => document.getElementById(id);
+const pad = n => String(n).padStart(2, '0');
+function stamp(ms) { const d = new Date(ms); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; }
+function dur(ms) { const s = Math.max(0, Math.round(ms / 1000)); return `${pad(Math.floor(s / 3600))}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`; }
+function durWords(ms) { const m = Math.round(ms / 60000); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`; }
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'], MONS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function whenWords(ms) { const d = new Date(ms); return `${DAYS[d.getDay()]} ${d.getDate()} ${MONS[d.getMonth()]}, ${pad(d.getHours())}:${pad(d.getMinutes())}`; }
+const nf = new Intl.NumberFormat('en-GB');
+function withTimeout(p, ms, what) { return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`${what} timed out`)), ms))]); }
+
+const logLines = [];
+function log(msg) {
+  const line = `${stamp(Date.now()).slice(11)}  ${msg}`;
+  logLines.push(line); if (logLines.length > 200) logLines.shift();
+  $('log').textContent = logLines.join('\n');
+}
+let toastTimer = null;
+function toast(msg, bad) { const el = $('toast'); el.textContent = msg; el.style.color = bad ? 'var(--bad)' : 'var(--ok)'; clearTimeout(toastTimer); toastTimer = setTimeout(() => el.textContent = '', 5000); }
+
+/* ---------- Settings (per-phone convenience) ---------- */
+const settings = { pollMs: 2000, piDiv: 10 };
+try { Object.assign(settings, JSON.parse(localStorage.getItem('rpl-settings') || '{}')); } catch (e) {}
+$('selPoll').value = String(settings.pollMs);
+$('selDiv').value = String(settings.piDiv);
+function saveSettings() { try { localStorage.setItem('rpl-settings', JSON.stringify(settings)); } catch (e) {} }
+const fmtPI = p => p == null ? '' : (settings.piDiv === 10 ? (p / 10).toFixed(1) : String(p));
+
+/* ---------- Storage: IndexedDB, one row per reading ---------- */
+let db = null;
+function idbOpen() {
+  return new Promise(res => {
+    try {
+      const r = indexedDB.open('ring-pi-logger', 1);
+      r.onupgradeneeded = () => {
+        const d = r.result;
+        d.createObjectStore('rows', { autoIncrement: true }).createIndex('sid', 'sid');
+        d.createObjectStore('sessions', { keyPath: 'sid' });
+      };
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => res(null);
+      r.onblocked = () => res(null);
+    } catch (e) { res(null); }
+  });
+}
+function idbPut(store, val) {
+  if (!db) return;
+  try { db.transaction(store, 'readwrite').objectStore(store).put(val); } catch (e) { log('Save failed: ' + e.message); }
+}
+function idbAll(store) {
+  return new Promise(res => {
+    if (!db) return res([]);
+    try { const q = db.transaction(store).objectStore(store).getAll(); q.onsuccess = () => res(q.result || []); q.onerror = () => res([]); } catch (e) { res([]); }
+  });
+}
+function idbRows(sid) {
+  return new Promise(res => {
+    if (!db) return res([]);
+    try { const q = db.transaction('rows').objectStore('rows').index('sid').getAll(sid); q.onsuccess = () => res(q.result || []); q.onerror = () => res([]); } catch (e) { res([]); }
+  });
+}
+function idbDeleteSession(sid) {
+  return new Promise(res => {
+    if (!db) return res();
+    try {
+      const tx = db.transaction(['rows', 'sessions'], 'readwrite');
+      tx.objectStore('sessions').delete(sid);
+      const idx = tx.objectStore('rows').index('sid');
+      const cur = idx.openKeyCursor(IDBKeyRange.only(sid));
+      cur.onsuccess = () => { const c = cur.result; if (c) { tx.objectStore('rows').delete(c.primaryKey); c.continue(); } };
+      tx.oncomplete = () => res(); tx.onerror = () => res();
+    } catch (e) { res(); }
+  });
+}
+
+/* ---------- Recording session ---------- */
+let session = null;
+function newSession(device, demo) {
+  session = { sid: 's' + Date.now(), start: Date.now(), end: Date.now(), device: device || '', demo: !!demo, n: 0, rows: [],
+              piN: 0, piSum: 0, piMin: Infinity, piMax: -Infinity };
+  if (!demo) saveMeta();
+  updateStats(); drawChart(); setExportEnabled(false);
+}
+function saveMeta() {
+  if (!session || session.demo) return;
+  const { sid, start, end, device, n, piN, piSum, piMin, piMax } = session;
+  idbPut('sessions', { sid, start, end, device, n, piN, piSum, piMin: isFinite(piMin) ? piMin : null, piMax: isFinite(piMax) ? piMax : null });
+}
+function addReading(r) {
+  if (!session) return;
+  session.rows.push(r); session.n++; session.end = r.t;
+  if (r.p != null) { session.piN++; session.piSum += r.p; session.piMin = Math.min(session.piMin, r.p); session.piMax = Math.max(session.piMax, r.p); }
+  if (!session.demo) {
+    idbPut('rows', { sid: session.sid, t: r.t, s: r.s, h: r.h, p: r.p, m: r.m, b: r.b, w: r.w, c: r.c, x: r.x });
+    if (session.n % 15 === 1) saveMeta();
+  }
+  if (session.n === 1) { setExportEnabled(true); log(`First reading: ${r.x}${r.crcOk === null ? '' : r.crcOk ? ' (checksum ok)' : ' (checksum mismatch)'}`); }
+  showReading(r); updateStats(); drawChartSoon();
+}
+
+/* ---------- Live display ---------- */
+function showReading(r) {
+  const piTxt = r.p == null ? '—' : fmtPI(r.p);
+  $('pi').textContent = piTxt;
+  $('piUnit').hidden = r.p == null;
+  $('piRaw').textContent = 'raw ' + (r.p == null ? '—' : r.p);
+  $('spo2').textContent = r.s ?? '—';
+  $('hr').textContent = r.h ?? '—';
+  $('mot').textContent = r.m;
+  $('bat').textContent = r.b;
+  const f = $('finger');
+  if (!r.w) { f.dataset.on = '0'; f.textContent = 'Ring is off the finger'; }
+  else if (r.c) { f.dataset.on = '0'; f.textContent = 'On finger, settling…'; }
+  else if (r.s == null) { f.dataset.on = '0'; f.textContent = 'On finger, no clean reading yet'; }
+  else { f.dataset.on = '1'; f.textContent = 'On finger · ' + stamp(r.t).slice(11); }
+  $('dimPi').textContent = r.p == null ? '—' : piTxt + (settings.piDiv === 10 ? ' %' : '');
+}
+function updateStats() {
+  const el = $('stats');
+  if (!session || !session.n) { el.textContent = 'no readings yet'; return; }
+  if (!session.piN) { el.textContent = `${nf.format(session.n)} readings, none with PI yet`; return; }
+  el.textContent = `avg ${fmtAvg(session.piSum, session.piN)} · min ${fmtPI(session.piMin)} · max ${fmtPI(session.piMax)} · ${nf.format(session.n)} readings`;
+}
+function fmtAvg(sum, n) { if (!n) return '—'; const a = sum / n; return (settings.piDiv === 10 ? a / 10 : a).toFixed(1); }
+setInterval(() => { $('elapsed').textContent = session ? dur((running ? Date.now() : session.end) - session.start) : '00:00:00'; }, 1000);
+
+/* ---------- Trend chart ---------- */
+let chartPending = false;
+function drawChartSoon() { if (chartPending) return; chartPending = true; setTimeout(() => { chartPending = false; drawChart(); }, 1000); }
+function drawChart() {
+  const cv = $('chart'), dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (!W || !H) return;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  const g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  const css = getComputedStyle(document.documentElement);
+  const cLine = css.getPropertyValue('--line').trim(), cMuted = css.getPropertyValue('--muted').trim(), cAcc = css.getPropertyValue('--accent').trim();
+  const padL = 34, padR = 10, padT = 10, padB = 20, pw = W - padL - padR, ph = H - padT - padB;
+  const rows = session ? session.rows : [];
+  const pts = rows.filter(r => r.p != null);
+  const div = settings.piDiv;
+  let top = 5 * div;
+  for (const r of pts) if (r.p > top) top = r.p;
+  top *= 1.12;
+  const ticks = niceTicks(top / div);
+  top = ticks[ticks.length - 1] * div;
+  g.font = '11px ' + css.getPropertyValue('--font-num'); g.textBaseline = 'middle'; g.textAlign = 'right';
+  for (const tv of ticks) {
+    const y = padT + ph - (tv * div / top) * ph;
+    g.strokeStyle = cLine; g.lineWidth = 1; g.beginPath(); g.moveTo(padL, y + .5); g.lineTo(W - padR, y + .5); g.stroke();
+    g.fillStyle = cMuted; g.fillText(div === 10 ? tv.toFixed(tv % 1 ? 1 : 0) : tv, padL - 6, y);
+  }
+  if (!session || rows.length < 2) {
+    g.textAlign = 'center'; g.fillStyle = cMuted; g.fillText('The PI trend appears here once readings arrive', padL + pw / 2, padT + ph / 2); return;
+  }
+  const t0 = session.start, t1 = Math.max(session.end, t0 + 60000), span = t1 - t0;
+  g.textAlign = 'left'; g.fillStyle = cMuted; g.textBaseline = 'alphabetic';
+  g.fillText(stamp(t0).slice(11, 16), padL, H - 5);
+  g.textAlign = 'right'; g.fillText(stamp(t1).slice(11, 16), W - padR, H - 5);
+  // Average into one bucket per pixel column; empty columns break the line.
+  const cols = Math.max(1, Math.floor(pw)), sum = new Float64Array(cols), cnt = new Uint32Array(cols);
+  for (const r of pts) { const i = Math.min(cols - 1, Math.floor((r.t - t0) / span * cols)); sum[i] += r.p; cnt[i]++; }
+  const gapCols = Math.max(2, Math.ceil(cols * (settings.pollMs * 4) / span));
+  g.strokeStyle = cAcc; g.lineWidth = 1.6; g.lineJoin = 'round'; g.beginPath();
+  let last = -1e9;
+  for (let i = 0; i < cols; i++) {
+    if (!cnt[i]) continue;
+    const x = padL + i, y = padT + ph - (sum[i] / cnt[i] / top) * ph;
+    if (i - last > gapCols) g.moveTo(x, y); else g.lineTo(x, y);
+    last = i;
+  }
+  g.stroke();
+  if (last >= 0) { const y = padT + ph - (sum[last] / cnt[last] / top) * ph; g.fillStyle = cAcc; g.beginPath(); g.arc(padL + last, y, 3, 0, Math.PI * 2); g.fill(); }
+}
+function niceTicks(max) {
+  const raw = max / 4, mag = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / mag;
+  const step = (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * mag;
+  const out = []; for (let v = 0; v <= max + step * .999; v += step) out.push(Math.round(v * 1000) / 1000);
+  return out;
+}
+window.addEventListener('resize', drawChartSoon);
+
+/* ---------- CSV export ---------- */
+function statusOf(r) { return !r.w ? 'off_finger' : r.c ? 'settling' : r.s == null ? 'no_reading' : 'ok'; }
+function toCSV(rows) {
+  const lines = ['time,spo2,pulse,pi_percent,pi_raw,motion,battery,on_finger,status,raw_hex'];
+  for (const r of rows) lines.push([stamp(r.t), r.s ?? '', r.h ?? '', fmtPI(r.p), r.p ?? '', r.m, r.b, r.w, statusOf(r), r.x].join(','));
+  return lines.join('\n') + '\n';
+}
+function fileName(start) { const s = stamp(start); return `ring-pi-${s.slice(0, 10)}_${s.slice(11, 13)}${s.slice(14, 16)}.csv`; }
+async function saveCSV(rows, start) {
+  const csv = toCSV(rows), name = fileName(start);
+  try {
+    const file = new File([csv], name, { type: 'text/csv' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file] }); toast('Shared ' + name); return; }
+  } catch (e) { if (e && e.name === 'AbortError') return; log('Share failed: ' + e.message); }
+  try {
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+    const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    toast('Downloading ' + name + '. If nothing happens, use Copy CSV.');
+  } catch (e) { toast('This browser blocked the file. Use Copy CSV instead.', true); }
+}
+async function copyCSV(rows) {
+  const csv = toCSV(rows);
+  try { await navigator.clipboard.writeText(csv); toast(`Copied ${nf.format(rows.length)} rows`); }
+  catch (e) { showText(rows); toast('Copy was blocked. The CSV is in the box below: select all and copy.', true); }
+}
+function showText(rows) { const t = $('csvText'); t.value = toCSV(rows); t.hidden = false; t.focus(); t.select(); }
+function setExportEnabled(on) { for (const id of ['btnSave', 'btnCopy', 'btnText']) $(id).disabled = !on; }
+$('btnSave').onclick = () => session && saveCSV(session.rows, session.start);
+$('btnCopy').onclick = () => session && copyCSV(session.rows);
+$('btnText').onclick = () => session && showText(session.rows);
+
+/* ---------- Saved recordings list ---------- */
+async function renderSessions() {
+  const list = $('sessions'); const all = (await idbAll('sessions')).sort((a, b) => b.start - a.start);
+  list.innerHTML = '';
+  if (!db) { list.innerHTML = '<li class="empty">This browser isn\'t saving recordings, so export before you close the page.</li>'; return; }
+  if (!all.length) { list.innerHTML = '<li class="empty">No saved recordings yet. Each connection starts one, and it is saved as readings arrive.</li>'; return; }
+  for (const s of all) {
+    const li = document.createElement('li');
+    const live = session && session.sid === s.sid && running;
+    const avg = fmtAvg(s.piSum, s.piN);
+    li.innerHTML = `<div class="meta"><div class="when"></div><div class="sub"></div></div><div class="acts"></div>`;
+    li.querySelector('.when').textContent = whenWords(s.start) + (live ? ' · recording' : '');
+    li.querySelector('.sub').textContent = `${durWords(s.end - s.start)} · ${nf.format(s.n)} readings · PI avg ${avg}`;
+    const acts = li.querySelector('.acts');
+    const bSave = document.createElement('button'); bSave.className = 'small'; bSave.textContent = 'Save CSV';
+    bSave.onclick = async () => saveCSV(await idbRows(s.sid), s.start);
+    const bCopy = document.createElement('button'); bCopy.className = 'small'; bCopy.textContent = 'Copy';
+    bCopy.onclick = async () => copyCSV(await idbRows(s.sid));
+    const bDel = document.createElement('button'); bDel.className = 'small danger'; bDel.textContent = 'Delete';
+    bDel.disabled = live;
+    bDel.onclick = async () => {
+      if (bDel.dataset.armed !== '1') { bDel.dataset.armed = '1'; bDel.textContent = 'Tap to confirm'; setTimeout(() => { bDel.dataset.armed = ''; bDel.textContent = 'Delete'; }, 4000); return; }
+      await idbDeleteSession(s.sid); toast('Recording deleted'); renderSessions();
+    };
+    acts.append(bSave, bCopy, bDel); list.append(li);
+  }
+}
+
+/* ---------- Bluetooth connection ---------- */
+let device = null, writeChar = null, notifyChar = null, running = false;
+let pollTimer = null, watchTimer = null, reconnectTimer = null, backoff = 2000;
+let lastDataAt = 0, writing = false, useNoResponse = false, flipped = false, connecting = false;
+
+function setState(state, text) { const el = $('state'); el.dataset.state = state; el.textContent = text; }
+
+async function start(showAll) {
+  if (!navigator.bluetooth) { $('nobt').hidden = false; return; }
+  let picked;
+  try {
+    picked = await navigator.bluetooth.requestDevice(showAll ? { acceptAllDevices: true, optionalServices: [SVC] } : { filters: FILTERS, optionalServices: [SVC] });
+  } catch (e) { if (e && e.name !== 'NotFoundError') { log('Picker: ' + e.message); toast(e.message, true); } return; }
+  stopDemo();
+  device = picked; device.addEventListener('gattserverdisconnected', onDisconnected);
+  log(`Picked ${device.name || 'unnamed device'}`);
+  running = true; newSession(device.name, false); renderSessions();
+  $('btnConnect').disabled = true; $('btnAll').disabled = true; $('btnStop').disabled = false; $('btnDemo').disabled = true;
+  keepAwake(true);
+  watchTimer = setInterval(watchdog, 5000);
+  connectGatt();
+}
+
+async function connectGatt() {
+  if (!running || connecting) return;
+  connecting = true; clearTimeout(reconnectTimer);
+  setState(session && session.n ? 'reconnecting' : 'connecting', session && session.n ? 'Reconnecting' : 'Connecting');
+  try {
+    const server = await withTimeout(device.gatt.connect(), 15000, 'Connect');
+    const svc = await withTimeout(server.getPrimaryService(SVC), 10000, 'Service lookup');
+    const chars = await svc.getCharacteristics();
+    for (const c of chars) { const p = c.properties; log(`Characteristic ${c.uuid} [${['read', 'write', 'writeWithoutResponse', 'notify', 'indicate'].filter(k => p[k]).join(', ')}]`); }
+    const canWrite = c => c.properties.write || c.properties.writeWithoutResponse;
+    const canNotify = c => c.properties.notify || c.properties.indicate;
+    const w = chars.find(c => c.uuid.toLowerCase().startsWith(WRITE_PREFIX) && canWrite(c)) || chars.find(canWrite);
+    const n = (w && canNotify(w)) ? w : chars.find(canNotify);
+    if (!w || !n) throw new Error('The ring did not offer the expected characteristics');
+    if (notifyChar) notifyChar.removeEventListener('characteristicvaluechanged', onNotify);
+    writeChar = w; notifyChar = n;
+    useNoResponse = !w.properties.write && !!w.properties.writeWithoutResponse; flipped = false;
+    notifyChar.addEventListener('characteristicvaluechanged', onNotify);
+    await withTimeout(notifyChar.startNotifications(), 10000, 'Subscribe');
+    lastDataAt = Date.now(); backoff = 2000;
+    setState('live', 'Live'); log('Connected, reading every ' + settings.pollMs / 1000 + ' s');
+    startPolling();
+  } catch (e) {
+    log('Connection failed: ' + e.message);
+    setState('reconnecting', 'Retrying');
+    try { device.gatt.connected && device.gatt.disconnect(); } catch (_) {}
+    scheduleReconnect();
+  } finally { connecting = false; }
+}
+
+function scheduleReconnect() {
+  if (!running) return;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(connectGatt, backoff);
+  log(`Next try in ${Math.round(backoff / 1000)} s`);
+  backoff = Math.min(backoff * 2, 30000);
+}
+
+function onDisconnected() {
+  stopPolling();
+  if (!running) return;
+  log('Ring disconnected'); setState('reconnecting', 'Reconnecting');
+  if (!connecting) scheduleReconnect();
+}
+
+function startPolling() { stopPolling(); poll(); pollTimer = setInterval(poll, settings.pollMs); }
+function stopPolling() { clearInterval(pollTimer); pollTimer = null; }
+
+async function poll() {
+  if (!writeChar || writing || !device || !device.gatt.connected) return;
+  writing = true;
+  try { await withTimeout(write(REQUEST), 5000, 'Request'); }
+  catch (e) {
+    if (!flipped) { flipped = true; useNoResponse = !useNoResponse; log(`Request failed (${e.message}); switching write mode`); }
+    else log('Request failed: ' + e.message);
+  } finally { writing = false; }
+}
+function write(bytes) {
+  if (useNoResponse && writeChar.writeValueWithoutResponse) return writeChar.writeValueWithoutResponse(bytes);
+  if (!useNoResponse && writeChar.writeValueWithResponse) return writeChar.writeValueWithResponse(bytes);
+  return writeChar.writeValue(bytes);
+}
+
+function onNotify(ev) {
+  const v = ev.target.value; if (!v) return;
+  lastDataAt = Date.now();
+  const r = assembler.push(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
+  if (r) addReading(r);
+}
+
+function watchdog() {
+  if (!running || connecting || !device) return;
+  const quiet = Date.now() - lastDataAt;
+  if (device.gatt.connected && quiet > Math.max(settings.pollMs * 6, 15000)) {
+    log(`No data for ${Math.round(quiet / 1000)} s, reconnecting`);
+    try { device.gatt.disconnect(); } catch (e) {}
+    stopPolling(); scheduleReconnect();
+  }
+  keepAwake(true);
+}
+
+function stop() {
+  running = false; stopPolling(); clearInterval(watchTimer); clearTimeout(reconnectTimer);
+  if (notifyChar) { notifyChar.removeEventListener('characteristicvaluechanged', onNotify); notifyChar.stopNotifications().catch(() => {}); }
+  try { device && device.gatt.connected && device.gatt.disconnect(); } catch (e) {}
+  writeChar = null; notifyChar = null;
+  stopDemo(); saveMeta(); keepAwake(false);
+  setState('idle', 'Stopped');
+  $('btnConnect').disabled = false; $('btnAll').disabled = false; $('btnStop').disabled = true; $('btnDemo').disabled = false;
+  log('Stopped'); renderSessions();
+}
+
+/* ---------- Keep the screen awake ---------- */
+let wakeLock = null;
+function keepAwake(on) {
+  try { if (navigator.bluetooth && typeof navigator.bluetooth.setScreenDimEnabled === 'function') navigator.bluetooth.setScreenDimEnabled(!on); } catch (e) {}
+  if (on && 'wakeLock' in navigator && !wakeLock && document.visibilityState === 'visible') {
+    navigator.wakeLock.request('screen').then(l => { wakeLock = l; l.addEventListener('release', () => { wakeLock = null; }); }).catch(() => {});
+  } else if (!on && wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && running) { keepAwake(true); drawChart(); }
+  if (document.visibilityState === 'hidden' && running) log('Page went to the background; readings may pause');
+});
+
+/* ---------- Dim mode ---------- */
+$('btnDim').onclick = () => { $('dim').hidden = false; };
+$('dim').onclick = () => { $('dim').hidden = true; drawChart(); };
+
+/* ---------- Demo: synthetic replies run through the same parser ---------- */
+let demoTimer = null, demoK = 0;
+function demoPacket() {
+  demoK++;
+  const off = demoK % 90 > 84;
+  const pi = Math.max(3, Math.round(22 + 12 * Math.sin(demoK / 25) + 5 * Math.sin(demoK / 6.3) + (Math.random() * 4 - 2)));
+  const p = new Uint8Array(13);
+  p[0] = off ? 0xFF : 95 + Math.round(Math.random() * 2); p[1] = off ? 0xFF : 60 + Math.round(4 * Math.sin(demoK / 9));
+  p[7] = 82; p[9] = Math.random() < .08 ? Math.round(Math.random() * 30) : 0; p[10] = off ? 0 : pi; p[11] = off ? 0 : 1;
+  const f = new Uint8Array(7 + 13 + 1); f.set([0x55, 0x00, 0xFF, 0x00, 0x00, 13, 0x00]); f.set(p, 7); f[20] = crc8(f, 20);
+  // Deliver as 20 + 1 bytes, the way a small Bluetooth packet size splits it.
+  [f.slice(0, 20), f.slice(20)].forEach(chunk => { const r = assembler.push(chunk); if (r) addReading(r); });
+}
+function startDemo() {
+  if (running) return;
+  stopDemo(); newSession('Demo', true); setState('demo', 'Demo data');
+  $('btnStop').disabled = false; $('btnConnect').disabled = true; $('btnAll').disabled = true;
+  running = true; demoK = 0;
+  for (let i = 0; i < 400; i++) { demoPacket(); session.rows[session.rows.length - 1].t = Date.now() - (400 - i) * settings.pollMs; }
+  session.start = session.rows[0].t; drawChart();
+  demoTimer = setInterval(demoPacket, settings.pollMs);
+  log('Demo started: these numbers are made up and are not saved');
+}
+function stopDemo() { clearInterval(demoTimer); demoTimer = null; }
+$('btnDemo').onclick = startDemo;
+
+/* ---------- Wiring ---------- */
+$('btnConnect').onclick = () => start(false);
+$('btnAll').onclick = () => start(true);
+$('btnStop').onclick = stop;
+$('selPoll').onchange = e => { settings.pollMs = +e.target.value; saveSettings(); if (pollTimer) startPolling(); if (demoTimer) { stopDemo(); demoTimer = setInterval(demoPacket, settings.pollMs); } };
+$('selDiv').onchange = e => { settings.piDiv = +e.target.value; saveSettings(); updateStats(); drawChart(); renderSessions(); if (session && session.rows.length) showReading(session.rows[session.rows.length - 1]); };
+$('btnCopyLog').onclick = async () => { try { await navigator.clipboard.writeText(logLines.join('\n')); toast('Log copied'); } catch (e) { toast('Copy was blocked; select the log text instead.', true); } };
+window.addEventListener('beforeunload', () => saveMeta());
+
+(async function init() {
+  if (!navigator.bluetooth) { $('nobt').hidden = false; $('btnConnect').disabled = true; $('btnAll').disabled = true; }
+  db = await idbOpen();
+  log(db ? 'Ready. Recordings are saved on this phone.' : 'Ready. This browser is not saving recordings.');
+  renderSessions(); drawChart();
+})();
+</script>
+</body>
+</html>
