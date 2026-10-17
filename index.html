@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0c0a09">
-<title>Ring PI Logger</title>
+<title>Oximeter PI Logger</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Red+Hat+Mono:wght@400;500&family=Red+Hat+Text:wght@400;500;700&display=swap">
 <style>
-/* Layout: one bedside column. Live PI first, then SpO2/pulse, the night's trend, controls, saved recordings.
+/* Layout: one bedside column. Live PI first, then SpO2/pulse, pulse wave, the night's trend, controls, saved recordings.
    Deliberately dark-only with warm, low-blue colours: it is meant to sit lit beside a bed all night. */
 :root{
   --bg:#0c0a09;
@@ -75,7 +75,9 @@ h1{font-size:16px;font-weight:700;letter-spacing:.02em;margin:0}
 
 .trend{display:flex;flex-direction:column;gap:6px}
 .trend-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
-canvas{width:100%;height:150px;display:block;background:var(--panel);border:1px solid var(--line);border-radius:12px}
+canvas{width:100%;display:block;background:var(--panel);border:1px solid var(--line);border-radius:12px}
+#chart{height:150px}
+#wave{height:56px}
 .stats{font:400 13px var(--font-num);color:var(--muted);font-variant-numeric:tabular-nums}
 
 .controls{display:flex;flex-wrap:wrap;gap:10px}
@@ -117,6 +119,8 @@ ol.check li::marker{color:var(--muted);font-family:var(--font-num)}
 details{border:1px solid var(--line);border-radius:10px;padding:8px 12px}
 summary{cursor:pointer;color:var(--muted);font-size:14px}
 pre.log{font:12px/1.5 var(--font-num);color:var(--muted);white-space:pre-wrap;word-break:break-all;margin:8px 0 0;max-height:260px;overflow:auto}
+.log-tools{display:flex;flex-wrap:wrap;gap:10px;align-items:end;margin-top:8px}
+.log-tools .field{flex:1 1 180px}
 
 textarea{width:100%;height:160px;font:12px var(--font-num);color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px}
 
@@ -130,7 +134,7 @@ textarea{width:100%;height:160px;font:12px var(--font-num);color:var(--fg);backg
 <body>
 <div class="wrap">
   <header>
-    <h1>Ring PI Logger</h1>
+    <h1>Oximeter PI Logger</h1>
     <span class="pill" id="state" data-state="idle">Not connected</span>
     <span class="clock" id="elapsed">00:00:00</span>
   </header>
@@ -145,14 +149,19 @@ textarea{width:100%;height:160px;font:12px var(--font-num);color:var(--fg);backg
       <span class="pi" id="pi">—</span><span class="pi-unit" id="piUnit">%</span>
       <span class="pi-raw" id="piRaw">raw —</span>
     </div>
-    <span class="finger" id="finger">Waiting for the ring</span>
+    <span class="finger" id="finger">Waiting for the oximeter</span>
   </div>
 
   <div class="vitals">
     <div class="vital"><span class="label">SpO₂</span><span class="v" id="spo2">—</span><span class="u">%</span></div>
     <div class="vital"><span class="label">Pulse</span><span class="v" id="hr">—</span><span class="u">bpm</span></div>
-    <div class="vital"><span class="label">Motion</span><span class="v" id="mot">—</span><span class="u">ring sensor</span></div>
+    <div class="vital"><span class="label">Motion</span><span class="v" id="mot">—</span><span class="u" id="motU">sensor</span></div>
     <div class="vital"><span class="label">Battery</span><span class="v" id="bat">—</span><span class="u">%</span></div>
+  </div>
+
+  <div class="trend" id="waveBox" hidden>
+    <span class="label">Pulse wave, last 3 s</span>
+    <canvas id="wave" aria-label="Live pulse waveform"></canvas>
   </div>
 
   <div class="trend">
@@ -164,12 +173,12 @@ textarea{width:100%;height:160px;font:12px var(--font-num);color:var(--fg);backg
   </div>
 
   <div class="controls">
-    <button class="primary" id="btnConnect">Connect ring</button>
+    <button class="primary" id="btnConnect">Connect device</button>
     <button id="btnStop" disabled>Stop</button>
     <button id="btnDim">Dim screen</button>
     <button id="btnDemo">Demo</button>
   </div>
-  <button class="link" id="btnAll" type="button">Ring not in the list? Show all nearby devices</button>
+  <button class="link" id="btnAll" type="button">Device not in the list? Show all nearby devices</button>
 
   <div class="settings">
     <div class="field">
@@ -187,7 +196,7 @@ textarea{width:100%;height:160px;font:12px var(--font-num);color:var(--fg);backg
         <option value="1">Raw = %</option>
       </select>
     </div>
-    <span class="hint" style="grid-column:1/-1">The ring's PI scaling isn't documented. The CSV always keeps the raw number, so you can change this later. Check it once against an oximeter that shows PI.</span>
+    <span class="hint" style="grid-column:1/-1">Wellue's developer kit gives PI in tenths of a percent (0–25.5 %, with 0 meaning no reading), so leave this on ÷ 10 unless a reference oximeter disagrees. The CSV keeps the raw number either way.</span>
   </div>
 
   <section>
@@ -209,9 +218,9 @@ textarea{width:100%;height:160px;font:12px var(--font-num);color:var(--fg);backg
   <section>
     <h2>Before you sleep</h2>
     <ol class="check">
-      <li>Fully close ViHealth so the ring is free to connect.</li>
+      <li>Fully close ViHealth so the oximeter is free to connect.</li>
       <li>Plug the phone in.</li>
-      <li>Open this page in Bluefy, tap <b>Connect ring</b> and pick your ring.</li>
+      <li>Open this page in Bluefy, tap <b>Connect device</b> and pick your oximeter.</li>
       <li>Leave Bluefy open and tap <b>Dim screen</b>. If the phone still locks, set Auto-Lock to Never for the night.</li>
       <li>In the morning tap <b>Stop</b>, then <b>Save CSV</b>.</li>
     </ol>
@@ -221,7 +230,17 @@ textarea{width:100%;height:160px;font:12px var(--font-num);color:var(--fg);backg
   <details id="logBox">
     <summary>Connection log</summary>
     <pre class="log" id="log"></pre>
-    <div class="controls" style="margin-top:8px"><button class="small" id="btnCopyLog">Copy log</button></div>
+    <div class="log-tools">
+      <div class="field">
+        <label class="label" for="selCmd">Live data request</label>
+        <select id="selCmd">
+          <option value="auto" selected>Automatic (0x1B, else 0x17)</option>
+          <option value="27">Real-time 0x1B only</option>
+          <option value="23">Legacy 0x17 only</option>
+        </select>
+      </div>
+      <button class="small" id="btnCopyLog">Copy log</button>
+    </div>
   </details>
 </div>
 
@@ -232,17 +251,19 @@ textarea{width:100%;height:160px;font:12px var(--font-num);color:var(--fg);backg
 
 <script>
 'use strict';
-/* ---------- Ring protocol (Viatom / Wellue O2 family) ----------
-   Service and request bytes follow ecostech/viatom-ble (MIT).
-   Request 0x17 = "real-time reading". Each reply notification holds:
-   [7] SpO2  [8] pulse  [14] battery  [16] motion  [17] PI (raw)  [18] on-finger flag
-   Frame: 55 cmd ~cmd seq seq lenLo lenHi payload… crc8(poly 0x07). */
+/* ---------- Protocol: Viatom / Wellue "Oxy" family (O2Ring, SleepU/SleepO2, KidsO2, O2 Max, CheckO2) ----------
+   Service and characteristics: ecostech/viatom-ble and home-health-hub/viatom-o2ring-ble (Wellue's LepuBle SDK).
+   Request frame:  AA cmd ~cmd blockLo blockHi lenLo lenHi data… crc8
+   Reply frame:    55 status ~status blockLo blockHi lenLo lenHi payload… crc8   (crc8: poly 0x07, seed 0)
+   0x1B real-time (current firmware): spo2[0] pulse[1..2] battery[3] charge[4] PI[5] lead-on[6] … waveLen[10..11] wave[12..]
+   0x17 legacy:                        spo2[0] pulse[1] … battery[7] charge[8] motion[9] PI[10] worn[11]  */
 const SVC = '14839ac4-7d7e-415c-9a42-167340cf2339';
 const WRITE_PREFIX = '8b00ace7';
-const REQUEST = new Uint8Array([0xAA, 0x17, 0xE8, 0x00, 0x00, 0x00, 0x00, 0x1B]);
+const CMD_RT = 0x1B, CMD_LEGACY = 0x17;
 const FILTERS = [
-  {services: [SVC]}, {namePrefix: 'O2'}, {namePrefix: 'Checkme'}, {namePrefix: 'Wellue'},
-  {namePrefix: 'Viatom'}, {namePrefix: 'SleepU'}, {namePrefix: 'OxyRing'}, {namePrefix: 'PO'}
+  {services: [SVC]}, {namePrefix: 'O2'}, {namePrefix: 'SleepU'}, {namePrefix: 'SleepO2'}, {namePrefix: 'Checkme'},
+  {namePrefix: 'CheckO2'}, {namePrefix: 'KidsO2'}, {namePrefix: 'BabyO2'}, {namePrefix: 'Wellue'}, {namePrefix: 'Viatom'},
+  {namePrefix: 'OxyRing'}, {namePrefix: 'CMRing'}, {namePrefix: 'PO'}
 ];
 
 function crc8(bytes, end) {
@@ -253,43 +274,72 @@ function crc8(bytes, end) {
   }
   return c;
 }
+function buildRequest(cmd, data) {
+  const f = new Uint8Array(8 + data.length);
+  f.set([0xAA, cmd, cmd ^ 0xFF, 0, 0, data.length & 0xFF, data.length >> 8]); f.set(data, 7);
+  f[f.length - 1] = crc8(f, f.length - 1);
+  return f;
+}
+const REQUESTS = { [CMD_RT]: buildRequest(CMD_RT, [0x00]), [CMD_LEGACY]: buildRequest(CMD_LEGACY, []) };
 function toHex(b) { let s = ''; for (const x of b) s += x.toString(16).padStart(2, '0'); return s; }
 
-/* Returns a reading object, or null if the bytes are too short. */
-function parsePacket(b) {
-  if (!b || b.length < 19) return null;
-  const worn = b[18] !== 0;
-  const spo2 = b[7], hr = b[8];
-  const calibrating = worn && spo2 === 0 && hr === 0;
-  const valid = worn && !calibrating && spo2 > 0 && spo2 <= 100 && hr > 0 && hr < 255;
-  let crcOk = null;
-  if (b.length >= 8 && b[0] === 0x55) {
-    const total = 8 + (b[5] | (b[6] << 8));
-    if (b.length >= total) crcOk = crc8(b, total - 1) === b[total - 1];
-  }
-  return {
-    t: Date.now(),
-    s: valid ? spo2 : null,
-    h: valid ? hr : null,
-    p: valid ? b[17] : null,
-    m: b[16], b: b[14], w: worn ? 1 : 0, c: calibrating ? 1 : 0,
-    x: toHex(b), crcOk
-  };
-}
-
-/* Some links split one reply over two notifications; stitch them. */
+/* Stitches notifications into whole reply frames using the length field. */
 const assembler = {
-  buf: null, at: 0,
-  push(bytes) {
-    if (bytes.length >= 19) { this.buf = null; return parsePacket(bytes); }
-    if (bytes[0] === 0x55) { this.buf = Array.from(bytes); this.at = Date.now(); return null; }
-    if (this.buf && Date.now() - this.at < 1500) {
-      for (const x of bytes) this.buf.push(x);
-      if (this.buf.length >= 19) { const whole = Uint8Array.from(this.buf); this.buf = null; return parsePacket(whole); }
+  buf: [], at: 0,
+  reset() { this.buf = []; },
+  push(bytes, now) {
+    const out = (this.buf.length && now - this.at > 600) ? this.drain(true) : [];
+    for (const x of bytes) this.buf.push(x);
+    this.at = now;
+    return out.concat(this.drain(false));
+  },
+  drain(force) {
+    const out = [];
+    while (this.buf.length) {
+      // A frame starts with 55 followed by a status byte and its complement.
+      if (this.buf[0] !== 0x55 || (this.buf.length >= 3 && (this.buf[1] ^ this.buf[2]) !== 0xFF)) { this.buf.shift(); continue; }
+      if (this.buf.length < 7) { if (force) this.buf = []; break; }
+      const len = this.buf[5] | (this.buf[6] << 8);
+      if (len > 4096) { this.buf.shift(); continue; }
+      const total = 8 + len;
+      if (this.buf.length >= total) {
+        const f = Uint8Array.from(this.buf.slice(0, total)); this.buf = this.buf.slice(total);
+        out.push({ f, crcOk: crc8(f, total - 1) === f[total - 1] });
+      } else {
+        // The checksum byte (or more) never came; use what arrived if it is long enough to read.
+        if (force) { out.push({ f: Uint8Array.from(this.buf), crcOk: null }); this.buf = []; }
+        break;
+      }
     }
-    return null; // stray tail, e.g. a lone checksum byte
+    return out;
   }
 };
+
+/* Turns one reply frame into a reading. Returns null if it is too short, or {error} for a refusal. */
+function parseFrame(f, cmd, crcOk) {
+  if (f[1] !== 0) return { error: `status ${f[1]}` };
+  const len = f[5] | (f[6] << 8);
+  const p = f.subarray(7, Math.min(f.length, 7 + len));
+  if (p.length < 12) return null;
+  const t = Date.now();
+  if (cmd === CMD_RT) {
+    const spo2 = p[0], pr = p[1] | (p[2] << 8), lead = p[6];
+    const vitals = spo2 >= 1 && spo2 <= 100 && pr >= 1 && pr < 300;
+    const worn = lead === 1 || vitals;
+    const valid = worn && vitals;
+    const waveLen = p[10] | (p[11] << 8);
+    return { t, s: valid ? spo2 : null, h: valid ? pr : null, p: valid && p[5] > 0 ? p[5] : null,
+             m: null, b: p[3], w: worn ? 1 : 0, c: worn && !vitals ? 1 : 0, k: 'rt',
+             x: toHex(f.subarray(0, 19)), wave: p.subarray(12, 12 + waveLen), crcOk };
+  }
+  const spo2 = p[0], hr = p[1];
+  const vitals = spo2 >= 1 && spo2 <= 100 && hr >= 1 && hr < 255;
+  const worn = p[11] !== 0 || vitals;  // some models leave the worn byte at 0
+  const valid = worn && vitals;
+  return { t, s: valid ? spo2 : null, h: valid ? hr : null, p: valid && p[10] > 0 ? p[10] : null,
+           m: p[9], b: p[7], w: worn ? 1 : 0, c: worn && !vitals ? 1 : 0, k: 'legacy',
+           x: toHex(f.subarray(0, 20)), wave: null, crcOk };
+}
 
 /* ---------- Small helpers ---------- */
 const $ = id => document.getElementById(id);
@@ -301,23 +351,26 @@ const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'], MONS = ['Jan', '
 function whenWords(ms) { const d = new Date(ms); return `${DAYS[d.getDay()]} ${d.getDate()} ${MONS[d.getMonth()]}, ${pad(d.getHours())}:${pad(d.getMinutes())}`; }
 const nf = new Intl.NumberFormat('en-GB');
 function withTimeout(p, ms, what) { return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`${what} timed out`)), ms))]); }
+function errText(e) { if (!e) return 'unknown error'; if (typeof e === 'string') return e; return [e.name, e.message].filter(Boolean).join(': ') || String(e); }
 
 const logLines = [];
 function log(msg) {
   const line = `${stamp(Date.now()).slice(11)}  ${msg}`;
-  logLines.push(line); if (logLines.length > 200) logLines.shift();
+  logLines.push(line); if (logLines.length > 300) logLines.shift();
   $('log').textContent = logLines.join('\n');
 }
 let toastTimer = null;
 function toast(msg, bad) { const el = $('toast'); el.textContent = msg; el.style.color = bad ? 'var(--bad)' : 'var(--ok)'; clearTimeout(toastTimer); toastTimer = setTimeout(() => el.textContent = '', 5000); }
 
 /* ---------- Settings (per-phone convenience) ---------- */
-const settings = { pollMs: 2000, piDiv: 10 };
+const settings = { pollMs: 2000, piDiv: 10, cmd: 'auto' };
 try { Object.assign(settings, JSON.parse(localStorage.getItem('rpl-settings') || '{}')); } catch (e) {}
 $('selPoll').value = String(settings.pollMs);
 $('selDiv').value = String(settings.piDiv);
+$('selCmd').value = String(settings.cmd);
 function saveSettings() { try { localStorage.setItem('rpl-settings', JSON.stringify(settings)); } catch (e) {} }
 const fmtPI = p => p == null ? '' : (settings.piDiv === 10 ? (p / 10).toFixed(1) : String(p));
+function fmtAvg(sum, n) { if (!n) return '—'; const a = sum / n; return (settings.piDiv === 10 ? a / 10 : a).toFixed(1); }
 
 /* ---------- Storage: IndexedDB, one row per reading ---------- */
 let db = null;
@@ -338,7 +391,7 @@ function idbOpen() {
 }
 function idbPut(store, val) {
   if (!db) return;
-  try { db.transaction(store, 'readwrite').objectStore(store).put(val); } catch (e) { log('Save failed: ' + e.message); }
+  try { db.transaction(store, 'readwrite').objectStore(store).put(val); } catch (e) { log('Save failed: ' + errText(e)); }
 }
 function idbAll(store) {
   return new Promise(res => {
@@ -358,8 +411,7 @@ function idbDeleteSession(sid) {
     try {
       const tx = db.transaction(['rows', 'sessions'], 'readwrite');
       tx.objectStore('sessions').delete(sid);
-      const idx = tx.objectStore('rows').index('sid');
-      const cur = idx.openKeyCursor(IDBKeyRange.only(sid));
+      const cur = tx.objectStore('rows').index('sid').openKeyCursor(IDBKeyRange.only(sid));
       cur.onsuccess = () => { const c = cur.result; if (c) { tx.objectStore('rows').delete(c.primaryKey); c.continue(); } };
       tx.oncomplete = () => res(); tx.onerror = () => res();
     } catch (e) { res(); }
@@ -381,13 +433,14 @@ function saveMeta() {
 }
 function addReading(r) {
   if (!session) return;
-  session.rows.push(r); session.n++; session.end = r.t;
+  const row = { t: r.t, s: r.s, h: r.h, p: r.p, m: r.m, b: r.b, w: r.w, c: r.c, k: r.k, x: r.x };
+  session.rows.push(row); session.n++; session.end = r.t;
   if (r.p != null) { session.piN++; session.piSum += r.p; session.piMin = Math.min(session.piMin, r.p); session.piMax = Math.max(session.piMax, r.p); }
   if (!session.demo) {
-    idbPut('rows', { sid: session.sid, t: r.t, s: r.s, h: r.h, p: r.p, m: r.m, b: r.b, w: r.w, c: r.c, x: r.x });
+    idbPut('rows', Object.assign({ sid: session.sid }, row));
     if (session.n % 15 === 1) saveMeta();
   }
-  if (session.n === 1) { setExportEnabled(true); log(`First reading: ${r.x}${r.crcOk === null ? '' : r.crcOk ? ' (checksum ok)' : ' (checksum mismatch)'}`); }
+  if (session.n === 1) setExportEnabled(true);
   showReading(r); updateStats(); drawChartSoon();
 }
 
@@ -395,16 +448,17 @@ function addReading(r) {
 function showReading(r) {
   const piTxt = r.p == null ? '—' : fmtPI(r.p);
   $('pi').textContent = piTxt;
-  $('piUnit').hidden = r.p == null;
+  $('piUnit').hidden = r.p == null || settings.piDiv !== 10;
   $('piRaw').textContent = 'raw ' + (r.p == null ? '—' : r.p);
   $('spo2').textContent = r.s ?? '—';
   $('hr').textContent = r.h ?? '—';
-  $('mot').textContent = r.m;
+  $('mot').textContent = r.m ?? '—';
+  $('motU').textContent = r.m == null ? 'not sent' : 'sensor';
   $('bat').textContent = r.b;
   const f = $('finger');
-  if (!r.w) { f.dataset.on = '0'; f.textContent = 'Ring is off the finger'; }
+  if (!r.w) { f.dataset.on = '0'; f.textContent = 'Off the finger'; }
   else if (r.c) { f.dataset.on = '0'; f.textContent = 'On finger, settling…'; }
-  else if (r.s == null) { f.dataset.on = '0'; f.textContent = 'On finger, no clean reading yet'; }
+  else if (r.p == null) { f.dataset.on = '0'; f.textContent = 'On finger, but no PI in this reading'; }
   else { f.dataset.on = '1'; f.textContent = 'On finger · ' + stamp(r.t).slice(11); }
   $('dimPi').textContent = r.p == null ? '—' : piTxt + (settings.piDiv === 10 ? ' %' : '');
 }
@@ -414,8 +468,29 @@ function updateStats() {
   if (!session.piN) { el.textContent = `${nf.format(session.n)} readings, none with PI yet`; return; }
   el.textContent = `avg ${fmtAvg(session.piSum, session.piN)} · min ${fmtPI(session.piMin)} · max ${fmtPI(session.piMax)} · ${nf.format(session.n)} readings`;
 }
-function fmtAvg(sum, n) { if (!n) return '—'; const a = sum / n; return (settings.piDiv === 10 ? a / 10 : a).toFixed(1); }
 setInterval(() => { $('elapsed').textContent = session ? dur((running ? Date.now() : session.end) - session.start) : '00:00:00'; }, 1000);
+
+/* ---------- Pulse wave (0x1B replies carry raw waveform samples) ---------- */
+const WAVE_MAX = 375;  // about 3 s at 125 samples per second
+let wave = [];
+function pushWave(samples) {
+  for (const v of samples) wave.push(v);
+  if (wave.length > WAVE_MAX) wave = wave.slice(wave.length - WAVE_MAX);
+  $('waveBox').hidden = false;
+  drawWave();
+}
+function drawWave() {
+  const cv = $('wave'), dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (!W || !H || wave.length < 2) return;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  const g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  let lo = Infinity, hi = -Infinity; for (const v of wave) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  const span = Math.max(1, hi - lo), padY = 6;
+  g.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+  g.lineWidth = 1.5; g.lineJoin = 'round'; g.beginPath();
+  wave.forEach((v, i) => { const x = 8 + (i / (WAVE_MAX - 1)) * (W - 16), y = padY + (1 - (v - lo) / span) * (H - 2 * padY); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+  g.stroke();
+}
 
 /* ---------- Trend chart ---------- */
 let chartPending = false;
@@ -443,7 +518,7 @@ function drawChart() {
     g.strokeStyle = cLine; g.lineWidth = 1; g.beginPath(); g.moveTo(padL, y + .5); g.lineTo(W - padR, y + .5); g.stroke();
     g.fillStyle = cMuted; g.fillText(div === 10 ? tv.toFixed(tv % 1 ? 1 : 0) : tv, padL - 6, y);
   }
-  if (!session || rows.length < 2) {
+  if (!session || pts.length < 2) {
     g.textAlign = 'center'; g.fillStyle = cMuted; g.fillText('The PI trend appears here once readings arrive', padL + pw / 2, padT + ph / 2); return;
   }
   const t0 = session.start, t1 = Math.max(session.end, t0 + 60000), span = t1 - t0;
@@ -471,22 +546,22 @@ function niceTicks(max) {
   const out = []; for (let v = 0; v <= max + step * .999; v += step) out.push(Math.round(v * 1000) / 1000);
   return out;
 }
-window.addEventListener('resize', drawChartSoon);
+window.addEventListener('resize', () => { drawChartSoon(); drawWave(); });
 
 /* ---------- CSV export ---------- */
 function statusOf(r) { return !r.w ? 'off_finger' : r.c ? 'settling' : r.s == null ? 'no_reading' : 'ok'; }
 function toCSV(rows) {
-  const lines = ['time,spo2,pulse,pi_percent,pi_raw,motion,battery,on_finger,status,raw_hex'];
-  for (const r of rows) lines.push([stamp(r.t), r.s ?? '', r.h ?? '', fmtPI(r.p), r.p ?? '', r.m, r.b, r.w, statusOf(r), r.x].join(','));
+  const lines = ['time,spo2,pulse,pi_percent,pi_raw,motion,battery,on_finger,status,command,raw_hex'];
+  for (const r of rows) lines.push([stamp(r.t), r.s ?? '', r.h ?? '', fmtPI(r.p), r.p ?? '', r.m ?? '', r.b, r.w, statusOf(r), r.k || '', r.x].join(','));
   return lines.join('\n') + '\n';
 }
-function fileName(start) { const s = stamp(start); return `ring-pi-${s.slice(0, 10)}_${s.slice(11, 13)}${s.slice(14, 16)}.csv`; }
+function fileName(start) { const s = stamp(start); return `oximeter-pi-${s.slice(0, 10)}_${s.slice(11, 13)}${s.slice(14, 16)}.csv`; }
 async function saveCSV(rows, start) {
   const csv = toCSV(rows), name = fileName(start);
   try {
     const file = new File([csv], name, { type: 'text/csv' });
     if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file] }); toast('Shared ' + name); return; }
-  } catch (e) { if (e && e.name === 'AbortError') return; log('Share failed: ' + e.message); }
+  } catch (e) { if (e && e.name === 'AbortError') return; log('Share failed: ' + errText(e)); }
   try {
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
     const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
@@ -514,10 +589,9 @@ async function renderSessions() {
   for (const s of all) {
     const li = document.createElement('li');
     const live = session && session.sid === s.sid && running;
-    const avg = fmtAvg(s.piSum, s.piN);
     li.innerHTML = `<div class="meta"><div class="when"></div><div class="sub"></div></div><div class="acts"></div>`;
     li.querySelector('.when').textContent = whenWords(s.start) + (live ? ' · recording' : '');
-    li.querySelector('.sub').textContent = `${durWords(s.end - s.start)} · ${nf.format(s.n)} readings · PI avg ${avg}`;
+    li.querySelector('.sub').textContent = `${durWords(s.end - s.start)} · ${nf.format(s.n)} readings · PI avg ${fmtAvg(s.piSum, s.piN)}`;
     const acts = li.querySelector('.acts');
     const bSave = document.createElement('button'); bSave.className = 'small'; bSave.textContent = 'Save CSV';
     bSave.onclick = async () => saveCSV(await idbRows(s.sid), s.start);
@@ -537,21 +611,24 @@ async function renderSessions() {
 let device = null, writeChar = null, notifyChar = null, running = false;
 let pollTimer = null, watchTimer = null, reconnectTimer = null, backoff = 2000;
 let lastDataAt = 0, writing = false, useNoResponse = false, flipped = false, connecting = false;
+let cmd = CMD_RT, pollsThisLink = 0, readingsThisLink = 0, framesLogged = 0, badCrc = 0, goodCrc = 0;
 
 function setState(state, text) { const el = $('state'); el.dataset.state = state; el.textContent = text; }
+function startCmd() { return settings.cmd === 'auto' ? CMD_RT : +settings.cmd; }
 
 async function start(showAll) {
   if (!navigator.bluetooth) { $('nobt').hidden = false; return; }
   let picked;
   try {
     picked = await navigator.bluetooth.requestDevice(showAll ? { acceptAllDevices: true, optionalServices: [SVC] } : { filters: FILTERS, optionalServices: [SVC] });
-  } catch (e) { if (e && e.name !== 'NotFoundError') { log('Picker: ' + e.message); toast(e.message, true); } return; }
+  } catch (e) { log('Device list closed without a choice (' + errText(e) + ')'); return; }
   stopDemo();
   device = picked; device.addEventListener('gattserverdisconnected', onDisconnected);
   log(`Picked ${device.name || 'unnamed device'}`);
   running = true; newSession(device.name, false); renderSessions();
   $('btnConnect').disabled = true; $('btnAll').disabled = true; $('btnStop').disabled = false; $('btnDemo').disabled = true;
   keepAwake(true);
+  framesLogged = 0; cmd = startCmd();
   watchTimer = setInterval(watchdog, 5000);
   connectGatt();
 }
@@ -569,17 +646,18 @@ async function connectGatt() {
     const canNotify = c => c.properties.notify || c.properties.indicate;
     const w = chars.find(c => c.uuid.toLowerCase().startsWith(WRITE_PREFIX) && canWrite(c)) || chars.find(canWrite);
     const n = (w && canNotify(w)) ? w : chars.find(canNotify);
-    if (!w || !n) throw new Error('The ring did not offer the expected characteristics');
+    if (!w || !n) throw new Error('The device did not offer the expected characteristics');
     if (notifyChar) notifyChar.removeEventListener('characteristicvaluechanged', onNotify);
     writeChar = w; notifyChar = n;
     useNoResponse = !w.properties.write && !!w.properties.writeWithoutResponse; flipped = false;
     notifyChar.addEventListener('characteristicvaluechanged', onNotify);
     await withTimeout(notifyChar.startNotifications(), 10000, 'Subscribe');
+    assembler.reset(); pollsThisLink = 0; readingsThisLink = 0;
     lastDataAt = Date.now(); backoff = 2000;
-    setState('live', 'Live'); log('Connected, reading every ' + settings.pollMs / 1000 + ' s');
+    setState('live', 'Live'); log(`Connected, sending 0x${cmd.toString(16).toUpperCase()} every ${settings.pollMs / 1000} s`);
     startPolling();
   } catch (e) {
-    log('Connection failed: ' + e.message);
+    log('Connection failed: ' + errText(e));
     setState('reconnecting', 'Retrying');
     try { device.gatt.connected && device.gatt.disconnect(); } catch (_) {}
     scheduleReconnect();
@@ -597,20 +675,28 @@ function scheduleReconnect() {
 function onDisconnected() {
   stopPolling();
   if (!running) return;
-  log('Ring disconnected'); setState('reconnecting', 'Reconnecting');
+  log('Device disconnected'); setState('reconnecting', 'Reconnecting');
   if (!connecting) scheduleReconnect();
 }
 
 function startPolling() { stopPolling(); poll(); pollTimer = setInterval(poll, settings.pollMs); }
 function stopPolling() { clearInterval(pollTimer); pollTimer = null; }
 
+function fallBackToLegacy(why) {
+  if (cmd === CMD_LEGACY || settings.cmd !== 'auto') return;
+  cmd = CMD_LEGACY; assembler.reset();
+  log(`Switching to the legacy 0x17 request: ${why}`);
+}
+
 async function poll() {
   if (!writeChar || writing || !device || !device.gatt.connected) return;
+  pollsThisLink++;
+  if (cmd === CMD_RT && readingsThisLink === 0 && pollsThisLink > 4) fallBackToLegacy('no usable reply to 0x1B');
   writing = true;
-  try { await withTimeout(write(REQUEST), 5000, 'Request'); }
+  try { await withTimeout(write(REQUESTS[cmd]), 5000, 'Request'); }
   catch (e) {
-    if (!flipped) { flipped = true; useNoResponse = !useNoResponse; log(`Request failed (${e.message}); switching write mode`); }
-    else log('Request failed: ' + e.message);
+    if (!flipped) { flipped = true; useNoResponse = !useNoResponse; log(`Request failed (${errText(e)}); switching write mode`); }
+    else log('Request failed: ' + errText(e));
   } finally { writing = false; }
 }
 function write(bytes) {
@@ -622,8 +708,25 @@ function write(bytes) {
 function onNotify(ev) {
   const v = ev.target.value; if (!v) return;
   lastDataAt = Date.now();
-  const r = assembler.push(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
-  if (r) addReading(r);
+  for (const fr of assembler.push(new Uint8Array(v.buffer, v.byteOffset, v.byteLength), lastDataAt)) handleFrame(fr);
+}
+function handleFrame({ f, crcOk }) {
+  if (framesLogged < 4) {
+    framesLogged++;
+    log(`Reply to 0x${cmd.toString(16).toUpperCase()}: ${toHex(f.subarray(0, 24))}${f.length > 24 ? '…' : ''} (${f.length} bytes${crcOk === null ? ', no checksum' : crcOk ? ', checksum ok' : ', checksum mismatch'})`);
+  }
+  if (crcOk === true) goodCrc++;
+  if (crcOk === false) {
+    badCrc++;
+    if (goodCrc > 0 || badCrc < 6) return;  // skip damaged frames unless checksums never match at all
+  }
+  const r = parseFrame(f, cmd, crcOk);
+  if (!r) return;
+  if (r.error) { log('Device refused the request (' + r.error + ')'); if (cmd === CMD_RT && !readingsThisLink) fallBackToLegacy('0x1B refused'); return; }
+  readingsThisLink++;
+  if (readingsThisLink === 1) log(`Reading: SpO2 ${r.s ?? '—'}, pulse ${r.h ?? '—'}, PI raw ${r.p ?? '—'}, ${r.w ? 'on finger' : 'off finger'}${r.wave ? `, ${r.wave.length} wave samples` : ''}`);
+  if (r.wave && r.wave.length) pushWave(r.wave);
+  addReading(r);
 }
 
 function watchdog() {
@@ -663,29 +766,36 @@ document.addEventListener('visibilitychange', () => {
 
 /* ---------- Dim mode ---------- */
 $('btnDim').onclick = () => { $('dim').hidden = false; };
-$('dim').onclick = () => { $('dim').hidden = true; drawChart(); };
+$('dim').onclick = () => { $('dim').hidden = true; drawChart(); drawWave(); };
 
-/* ---------- Demo: synthetic replies run through the same parser ---------- */
-let demoTimer = null, demoK = 0;
-function demoPacket() {
+/* ---------- Demo: synthetic 0x1B replies, split into 20-byte notifications, through the same parser ---------- */
+let demoTimer = null, demoK = 0, demoPhase = 0;
+function demoFrame() {
   demoK++;
   const off = demoK % 90 > 84;
   const pi = Math.max(3, Math.round(22 + 12 * Math.sin(demoK / 25) + 5 * Math.sin(demoK / 6.3) + (Math.random() * 4 - 2)));
-  const p = new Uint8Array(13);
-  p[0] = off ? 0xFF : 95 + Math.round(Math.random() * 2); p[1] = off ? 0xFF : 60 + Math.round(4 * Math.sin(demoK / 9));
-  p[7] = 82; p[9] = Math.random() < .08 ? Math.round(Math.random() * 30) : 0; p[10] = off ? 0 : pi; p[11] = off ? 0 : 1;
-  const f = new Uint8Array(7 + 13 + 1); f.set([0x55, 0x00, 0xFF, 0x00, 0x00, 13, 0x00]); f.set(p, 7); f[20] = crc8(f, 20);
-  // Deliver as 20 + 1 bytes, the way a small Bluetooth packet size splits it.
-  [f.slice(0, 20), f.slice(20)].forEach(chunk => { const r = assembler.push(chunk); if (r) addReading(r); });
+  const n = Math.round(125 * settings.pollMs / 1000), p = new Uint8Array(12 + n);
+  const pr = off ? 0 : 60 + Math.round(4 * Math.sin(demoK / 9));
+  p[0] = off ? 0 : 95 + Math.round(Math.random() * 2); p[1] = pr & 0xFF; p[2] = pr >> 8;
+  p[3] = 82; p[5] = off ? 0 : pi; p[6] = off ? 0 : 1; p[10] = n & 0xFF; p[11] = n >> 8;
+  for (let i = 0; i < n; i++) {
+    demoPhase += (pr || 60) / 60 / 125;
+    const ph = demoPhase % 1;
+    p[12 + i] = off ? 128 : Math.round(60 + 120 * Math.exp(-Math.pow((ph - .18) / .08, 2)) + 35 * Math.exp(-Math.pow((ph - .45) / .1, 2)));
+  }
+  const f = new Uint8Array(8 + p.length);
+  f.set([0x55, 0x00, 0xFF, 0x00, 0x00, p.length & 0xFF, p.length >> 8]); f.set(p, 7); f[f.length - 1] = crc8(f, f.length - 1);
+  const now = Date.now();
+  for (let i = 0; i < f.length; i += 20) for (const fr of assembler.push(f.slice(i, i + 20), now)) handleFrame(fr);
 }
 function startDemo() {
   if (running) return;
   stopDemo(); newSession('Demo', true); setState('demo', 'Demo data');
   $('btnStop').disabled = false; $('btnConnect').disabled = true; $('btnAll').disabled = true;
-  running = true; demoK = 0;
-  for (let i = 0; i < 400; i++) { demoPacket(); session.rows[session.rows.length - 1].t = Date.now() - (400 - i) * settings.pollMs; }
+  running = true; demoK = 0; cmd = CMD_RT; framesLogged = 4; readingsThisLink = 1; assembler.reset();
+  for (let i = 0; i < 400; i++) { demoFrame(); session.rows[session.rows.length - 1].t = Date.now() - (400 - i) * settings.pollMs; }
   session.start = session.rows[0].t; drawChart();
-  demoTimer = setInterval(demoPacket, settings.pollMs);
+  demoTimer = setInterval(demoFrame, settings.pollMs);
   log('Demo started: these numbers are made up and are not saved');
 }
 function stopDemo() { clearInterval(demoTimer); demoTimer = null; }
@@ -695,15 +805,19 @@ $('btnDemo').onclick = startDemo;
 $('btnConnect').onclick = () => start(false);
 $('btnAll').onclick = () => start(true);
 $('btnStop').onclick = stop;
-$('selPoll').onchange = e => { settings.pollMs = +e.target.value; saveSettings(); if (pollTimer) startPolling(); if (demoTimer) { stopDemo(); demoTimer = setInterval(demoPacket, settings.pollMs); } };
+$('selPoll').onchange = e => { settings.pollMs = +e.target.value; saveSettings(); if (pollTimer) startPolling(); if (demoTimer) { stopDemo(); demoTimer = setInterval(demoFrame, settings.pollMs); } };
 $('selDiv').onchange = e => { settings.piDiv = +e.target.value; saveSettings(); updateStats(); drawChart(); renderSessions(); if (session && session.rows.length) showReading(session.rows[session.rows.length - 1]); };
+$('selCmd').onchange = e => {
+  settings.cmd = e.target.value; saveSettings();
+  if (running && !demoTimer) { cmd = startCmd(); assembler.reset(); readingsThisLink = 0; pollsThisLink = 0; framesLogged = 0; log(`Now sending 0x${cmd.toString(16).toUpperCase()}`); }
+};
 $('btnCopyLog').onclick = async () => { try { await navigator.clipboard.writeText(logLines.join('\n')); toast('Log copied'); } catch (e) { toast('Copy was blocked; select the log text instead.', true); } };
 window.addEventListener('beforeunload', () => saveMeta());
 
 (async function init() {
   if (!navigator.bluetooth) { $('nobt').hidden = false; $('btnConnect').disabled = true; $('btnAll').disabled = true; }
   db = await idbOpen();
-  log(db ? 'Ready. Recordings are saved on this phone.' : 'Ready. This browser is not saving recordings.');
+  log(db ? 'Ready (v2). Recordings are saved on this phone.' : 'Ready (v2). This browser is not saving recordings.');
   renderSessions(); drawChart();
 })();
 </script>
