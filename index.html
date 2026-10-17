@@ -440,47 +440,59 @@ function saveMeta() {
 }
 function addReading(r) {
   if (!session) return;
-  const row = { t: r.t, s: r.s, h: r.h, p: r.p, m: r.m, b: r.b, w: r.w, c: r.c, k: r.k, a: r.a, v: r.v, x: r.x };
+  const row = { t: r.t, s: r.s, h: r.h, p: r.p, m: r.m, b: r.b, w: r.w, c: r.c, k: r.k, a: r.a, q: smoothAmp(r), v: r.v, x: r.x };
   session.rows.push(row); session.n++; session.end = r.t;
   if (r.p != null) { session.piN++; session.piSum += r.p; session.piMin = Math.min(session.piMin, r.p); session.piMax = Math.max(session.piMax, r.p); }
-  if (r.a != null) { session.ampN++; session.ampSum += r.a; session.ampMin = Math.min(session.ampMin, r.a); session.ampMax = Math.max(session.ampMax, r.a); }
+  if (row.q != null) { session.ampN++; session.ampSum += row.q; session.ampMin = Math.min(session.ampMin, row.q); session.ampMax = Math.max(session.ampMax, row.q); }
   if (!session.demo) {
     idbPut('rows', Object.assign({ sid: session.sid }, row));
     if (session.n % 15 === 1) saveMeta();
   }
   if (session.n === 1) setExportEnabled(true);
-  showReading(r); updateStats(); drawChartSoon();
+  showReading(row); updateStats(); drawChartSoon();
+}
+/* Median wave amplitude over the last 10 s of readings (this one included); damps single beats and brief movement. */
+const AMP_WINDOW_MS = 10000;
+function smoothAmp(r) {
+  if (r.a == null) return null;
+  const vals = [r.a];
+  for (let i = session.rows.length - 1; i >= 0 && session.rows[i].t >= r.t - AMP_WINDOW_MS; i--) if (session.rows[i].a != null) vals.push(session.rows[i].a);
+  vals.sort((x, y) => x - y);
+  const m = vals.length >> 1;
+  return vals.length % 2 ? vals[m] : (vals[m - 1] + vals[m]) / 2;
 }
 
 /* ---------- Live display ---------- */
 /* When the device never sends PI but does send a pulse wave, the wave amplitude takes PI's place on screen. */
 function useAmp() { return !!session && session.piN === 0 && session.ampN > 0; }
+/* Wave amplitude as a percent of the 0–255 sample range. Not PI: it is the pulse wave's height on the device's own scale. */
+const ampPct = a => a == null ? null : Math.round(a / 2.55);
 function showReading(r) {
   const amp = useAmp();
   const piTxt = r.p == null ? '—' : fmtPI(r.p);
-  const bigTxt = amp ? (r.a ?? '—') : piTxt;
+  const bigTxt = amp ? (r.q == null ? '—' : String(ampPct(r.q))) : piTxt;
   $('heroLabel').textContent = amp ? 'Pulse wave amplitude' : 'Perfusion index';
   $('trendLabel').textContent = amp ? 'Wave amplitude this recording' : 'PI this recording';
   $('pi').textContent = bigTxt;
-  $('piUnit').hidden = amp || r.p == null || settings.piDiv !== 10;
-  $('piRaw').textContent = amp ? 'PI not sent by this device' : 'raw ' + (r.p == null ? '—' : r.p);
+  $('piUnit').hidden = amp ? r.q == null : (r.p == null || settings.piDiv !== 10);
+  $('piRaw').textContent = amp ? 'of wave scale, last 10 s' : 'raw ' + (r.p == null ? '—' : r.p);
   $('spo2').textContent = r.s ?? '—';
   $('hr').textContent = r.h ?? '—';
   if (r.k !== 'rt') { $('t3L').textContent = 'Motion'; $('mot').textContent = r.m ?? '—'; $('motU').textContent = 'sensor'; }
   else if (amp) { $('t3L').textContent = 'PI'; $('mot').textContent = '—'; $('motU').textContent = 'not sent'; }
-  else { $('t3L').textContent = 'Wave amp'; $('mot').textContent = r.a ?? '—'; $('motU').textContent = 'raw units'; }
+  else { $('t3L').textContent = 'Wave amp'; $('mot').textContent = r.q == null ? '—' : ampPct(r.q); $('motU').textContent = '% of scale'; }
   $('bat').textContent = r.b;
   const f = $('finger');
   if (!r.w) { f.dataset.on = '0'; f.textContent = 'Off the finger'; }
   else if (r.c) { f.dataset.on = '0'; f.textContent = 'On finger, settling…'; }
   else if (r.p == null && !amp) { f.dataset.on = '0'; f.textContent = 'On finger, but no PI in this reading'; }
   else { f.dataset.on = '1'; f.textContent = 'On finger · ' + stamp(r.t).slice(11); }
-  $('dimPi').textContent = amp ? bigTxt : (r.p == null ? '—' : piTxt + (settings.piDiv === 10 ? ' %' : ''));
+  $('dimPi').textContent = amp ? (r.q == null ? '—' : bigTxt + ' %') : (r.p == null ? '—' : piTxt + (settings.piDiv === 10 ? ' %' : ''));
 }
 function updateStats() {
   const el = $('stats');
   if (!session || !session.n) { el.textContent = 'no readings yet'; return; }
-  if (useAmp()) { el.textContent = `avg ${(session.ampSum / session.ampN).toFixed(0)} · min ${session.ampMin} · max ${session.ampMax} · ${nf.format(session.n)} readings`; return; }
+  if (useAmp()) { el.textContent = `avg ${ampPct(session.ampSum / session.ampN)} % · min ${ampPct(session.ampMin)} % · max ${ampPct(session.ampMax)} % · ${nf.format(session.n)} readings`; return; }
   if (!session.piN) { el.textContent = `${nf.format(session.n)} readings, none with PI yet`; return; }
   el.textContent = `avg ${fmtAvg(session.piSum, session.piN)} · min ${fmtPI(session.piMin)} · max ${fmtPI(session.piMax)} · ${nf.format(session.n)} readings`;
 }
@@ -521,10 +533,10 @@ function drawChart() {
   const cLine = css.getPropertyValue('--line').trim(), cMuted = css.getPropertyValue('--muted').trim(), cAcc = css.getPropertyValue('--accent').trim();
   const padL = 34, padR = 10, padT = 10, padB = 20, pw = W - padL - padR, ph = H - padT - padB;
   const rows = session ? session.rows : [];
-  const amp = useAmp(), key = amp ? 'a' : 'p';
+  const amp = useAmp(), key = amp ? 'q' : 'p';
   const pts = rows.filter(r => r[key] != null);
-  const div = amp ? 1 : settings.piDiv;
-  let top = amp ? 20 : 5 * div;
+  const div = amp ? 2.55 : settings.piDiv;  // amplitude is charted as % of the 0–255 wave scale
+  let top = amp ? 10 * div : 5 * div;
   for (const r of pts) if (r[key] > top) top = r[key];
   top *= 1.12;
   const ticks = niceTicks(top / div);
@@ -568,8 +580,8 @@ window.addEventListener('resize', () => { drawChartSoon(); drawWave(); });
 /* ---------- CSV export ---------- */
 function statusOf(r) { return !r.w ? 'off_finger' : r.c ? 'settling' : r.s == null ? 'no_reading' : 'ok'; }
 function toCSV(rows) {
-  const lines = ['time,spo2,pulse,pi_percent,pi_raw,wave_amp,motion,battery,on_finger,status,command,raw_hex,wave_hex'];
-  for (const r of rows) lines.push([stamp(r.t), r.s ?? '', r.h ?? '', fmtPI(r.p), r.p ?? '', r.a ?? '', r.m ?? '', r.b, r.w, statusOf(r), r.k || '', r.x, r.v || ''].join(','));
+  const lines = ['time,spo2,pulse,pi_percent,pi_raw,wave_amp_pct_10s,wave_amp_raw,motion,battery,on_finger,status,command,raw_hex,wave_hex'];
+  for (const r of rows) lines.push([stamp(r.t), r.s ?? '', r.h ?? '', fmtPI(r.p), r.p ?? '', r.q == null ? '' : (r.q / 2.55).toFixed(1), r.a ?? '', r.m ?? '', r.b, r.w, statusOf(r), r.k || '', r.x, r.v || ''].join(','));
   return lines.join('\n') + '\n';
 }
 function fileName(start) { const s = stamp(start); return `oximeter-pi-${s.slice(0, 10)}_${s.slice(11, 13)}${s.slice(14, 16)}.csv`; }
@@ -608,7 +620,7 @@ async function renderSessions() {
     const live = session && session.sid === s.sid && running;
     li.innerHTML = `<div class="meta"><div class="when"></div><div class="sub"></div></div><div class="acts"></div>`;
     li.querySelector('.when').textContent = whenWords(s.start) + (live ? ' · recording' : '');
-    li.querySelector('.sub').textContent = `${durWords(s.end - s.start)} · ${nf.format(s.n)} readings · ` + (s.piN || !s.ampN ? `PI avg ${fmtAvg(s.piSum, s.piN)}` : `wave amp avg ${(s.ampSum / s.ampN).toFixed(0)}`);
+    li.querySelector('.sub').textContent = `${durWords(s.end - s.start)} · ${nf.format(s.n)} readings · ` + (s.piN || !s.ampN ? `PI avg ${fmtAvg(s.piSum, s.piN)}` : `wave amp avg ${ampPct(s.ampSum / s.ampN)} % of scale`);
     const acts = li.querySelector('.acts');
     const bSave = document.createElement('button'); bSave.className = 'small'; bSave.textContent = 'Save CSV';
     bSave.onclick = async () => saveCSV(await idbRows(s.sid), s.start);
@@ -834,7 +846,7 @@ window.addEventListener('beforeunload', () => saveMeta());
 (async function init() {
   if (!navigator.bluetooth) { $('nobt').hidden = false; $('btnConnect').disabled = true; $('btnAll').disabled = true; }
   db = await idbOpen();
-  log(db ? 'Ready (v3). Recordings are saved on this phone.' : 'Ready (v3). This browser is not saving recordings.');
+  log(db ? 'Ready (v5). Recordings are saved on this phone.' : 'Ready (v5). This browser is not saving recordings.');
   renderSessions(); drawChart();
 })();
 </script>
