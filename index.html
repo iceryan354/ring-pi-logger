@@ -184,8 +184,8 @@ textarea{width:100%;height:160px;font:12px var(--font-num);color:var(--fg);backg
     <div class="field">
       <label class="label" for="selPoll">Read every</label>
       <select id="selPoll">
-        <option value="1000">1 second</option>
-        <option value="2000" selected>2 seconds</option>
+        <option value="1000" selected>1 second</option>
+        <option value="2000">2 seconds</option>
         <option value="4000">4 seconds</option>
       </select>
     </div>
@@ -282,11 +282,20 @@ function buildRequest(cmd, data) {
 }
 const REQUESTS = { [CMD_RT]: buildRequest(CMD_RT, [0x00]), [CMD_LEGACY]: buildRequest(CMD_LEGACY, []) };
 function toHex(b) { let s = ''; for (const x of b) s += x.toString(16).padStart(2, '0'); return s; }
-/* Peak-to-trough size of the pulse wave in one reply: 95th minus 5th percentile, so a stray sample can't inflate it. */
-function waveAmp(w) {
-  if (!w || w.length < 30) return null;
-  const a = Array.from(w).sort((x, y) => x - y);
-  return a[Math.floor(a.length * .95)] - a[Math.floor(a.length * .05)];
+function median(v) { if (!v.length) return null; const a = Array.from(v).sort((x, y) => x - y), m = a.length >> 1; return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; }
+/* Beat heights in one chunk of pulse wave (125 samples per second). A window exactly one beat long, sized from the
+   pulse rate, always holds one full trough and one full peak, so max minus min inside it is that beat's height.
+   Windows slide by a quarter beat; a light 5-sample smoothing removes single-sample noise first. */
+function beatHeights(w, pr) {
+  if (!w || w.length < 40) return [];
+  const P = Math.round(125 * 60 / (pr >= 30 && pr <= 220 ? pr : 75));
+  const y = new Float32Array(w.length);
+  for (let i = 0; i < w.length; i++) { let s = 0, n = 0; for (let j = i - 2; j <= i + 2; j++) if (j >= 0 && j < w.length) { s += w[j]; n++; } y[i] = s / n; }
+  const span = (a, b) => { let lo = Infinity, hi = -Infinity; for (let i = a; i < b; i++) { if (y[i] < lo) lo = y[i]; if (y[i] > hi) hi = y[i]; } return hi - lo; };
+  if (y.length < P) return y.length >= 0.7 * P ? [span(0, y.length)] : [];
+  const out = [], step = Math.max(1, Math.round(P / 4));
+  for (let st = 0; st + P <= y.length; st += step) out.push(span(st, st + P));
+  return out;
 }
 
 /* Stitches notifications into whole reply frames using the length field. */
@@ -334,9 +343,10 @@ function parseFrame(f, cmd, crcOk) {
     const worn = lead === 1 || vitals;
     const valid = worn && vitals;
     const waveLen = p[10] | (p[11] << 8), wv = p.subarray(12, 12 + waveLen);
+    const hs = valid ? beatHeights(wv, pr) : [];
     return { t, s: valid ? spo2 : null, h: valid ? pr : null, p: valid && p[5] > 0 ? p[5] : null,
              m: null, b: p[3], w: worn ? 1 : 0, c: worn && !vitals ? 1 : 0, k: 'rt',
-             a: valid ? waveAmp(wv) : null, v: toHex(wv),
+             a: hs.length ? Math.round(median(hs) * 10) / 10 : null, hs, v: toHex(wv),
              x: toHex(f.subarray(0, 19)), wave: wv, crcOk };
   }
   const spo2 = p[0], hr = p[1];
@@ -345,7 +355,7 @@ function parseFrame(f, cmd, crcOk) {
   const valid = worn && vitals;
   return { t, s: valid ? spo2 : null, h: valid ? hr : null, p: valid && p[10] > 0 ? p[10] : null,
            m: p[9], b: p[7], w: worn ? 1 : 0, c: worn && !vitals ? 1 : 0, k: 'legacy',
-           a: null, v: '', x: toHex(f.subarray(0, 20)), wave: null, crcOk };
+           a: null, hs: [], v: '', x: toHex(f.subarray(0, 20)), wave: null, crcOk };
 }
 
 /* ---------- Small helpers ---------- */
@@ -370,7 +380,7 @@ let toastTimer = null;
 function toast(msg, bad) { const el = $('toast'); el.textContent = msg; el.style.color = bad ? 'var(--bad)' : 'var(--ok)'; clearTimeout(toastTimer); toastTimer = setTimeout(() => el.textContent = '', 5000); }
 
 /* ---------- Settings (per-phone convenience) ---------- */
-const settings = { pollMs: 2000, piDiv: 10, cmd: 'auto' };
+const settings = { pollMs: 1000, piDiv: 10, cmd: 'auto' };
 try { Object.assign(settings, JSON.parse(localStorage.getItem('rpl-settings') || '{}')); } catch (e) {}
 $('selPoll').value = String(settings.pollMs);
 $('selDiv').value = String(settings.piDiv);
@@ -430,6 +440,7 @@ let session = null;
 function newSession(device, demo) {
   session = { sid: 's' + Date.now(), start: Date.now(), end: Date.now(), device: device || '', demo: !!demo, n: 0, rows: [],
               piN: 0, piSum: 0, piMin: Infinity, piMax: -Infinity, ampN: 0, ampSum: 0, ampMin: Infinity, ampMax: -Infinity };
+  beatBuf = [];
   if (!demo) saveMeta();
   updateStats(); drawChart(); setExportEnabled(false);
 }
@@ -451,15 +462,14 @@ function addReading(r) {
   if (session.n === 1) setExportEnabled(true);
   showReading(row); updateStats(); drawChartSoon();
 }
-/* Median wave amplitude over the last 10 s of readings (this one included); damps single beats and brief movement. */
+/* Median of every beat height measured in the last 10 s; damps single odd beats and brief movement. */
 const AMP_WINDOW_MS = 10000;
+let beatBuf = [];
 function smoothAmp(r) {
-  if (r.a == null) return null;
-  const vals = [r.a];
-  for (let i = session.rows.length - 1; i >= 0 && session.rows[i].t >= r.t - AMP_WINDOW_MS; i--) if (session.rows[i].a != null) vals.push(session.rows[i].a);
-  vals.sort((x, y) => x - y);
-  const m = vals.length >> 1;
-  return vals.length % 2 ? vals[m] : (vals[m - 1] + vals[m]) / 2;
+  for (const h of r.hs || []) beatBuf.push({ t: r.t, h });
+  beatBuf = beatBuf.filter(b => b.t >= r.t - AMP_WINDOW_MS);
+  if (!r.hs || !r.hs.length || !beatBuf.length) return null;
+  return Math.round(median(beatBuf.map(b => b.h)) * 10) / 10;
 }
 
 /* ---------- Live display ---------- */
@@ -846,7 +856,7 @@ window.addEventListener('beforeunload', () => saveMeta());
 (async function init() {
   if (!navigator.bluetooth) { $('nobt').hidden = false; $('btnConnect').disabled = true; $('btnAll').disabled = true; }
   db = await idbOpen();
-  log(db ? 'Ready (v5). Recordings are saved on this phone.' : 'Ready (v5). This browser is not saving recordings.');
+  log(db ? 'Ready (v6). Recordings are saved on this phone.' : 'Ready (v6). This browser is not saving recordings.');
   renderSessions(); drawChart();
 })();
 </script>
