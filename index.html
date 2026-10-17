@@ -144,7 +144,7 @@ textarea{width:100%;height:160px;font:12px var(--font-num);color:var(--fg);backg
   </div>
 
   <div class="hero">
-    <span class="label">Perfusion index</span>
+    <span class="label" id="heroLabel">Perfusion index</span>
     <div class="pi-row">
       <span class="pi" id="pi">—</span><span class="pi-unit" id="piUnit">%</span>
       <span class="pi-raw" id="piRaw">raw —</span>
@@ -155,7 +155,7 @@ textarea{width:100%;height:160px;font:12px var(--font-num);color:var(--fg);backg
   <div class="vitals">
     <div class="vital"><span class="label">SpO₂</span><span class="v" id="spo2">—</span><span class="u">%</span></div>
     <div class="vital"><span class="label">Pulse</span><span class="v" id="hr">—</span><span class="u">bpm</span></div>
-    <div class="vital"><span class="label">Motion</span><span class="v" id="mot">—</span><span class="u" id="motU">sensor</span></div>
+    <div class="vital"><span class="label" id="t3L">Motion</span><span class="v" id="mot">—</span><span class="u" id="motU">sensor</span></div>
     <div class="vital"><span class="label">Battery</span><span class="v" id="bat">—</span><span class="u">%</span></div>
   </div>
 
@@ -166,7 +166,7 @@ textarea{width:100%;height:160px;font:12px var(--font-num);color:var(--fg);backg
 
   <div class="trend">
     <div class="trend-head">
-      <span class="label">PI this recording</span>
+      <span class="label" id="trendLabel">PI this recording</span>
       <span class="stats" id="stats">no readings yet</span>
     </div>
     <canvas id="chart" aria-label="Perfusion index over this recording"></canvas>
@@ -282,6 +282,12 @@ function buildRequest(cmd, data) {
 }
 const REQUESTS = { [CMD_RT]: buildRequest(CMD_RT, [0x00]), [CMD_LEGACY]: buildRequest(CMD_LEGACY, []) };
 function toHex(b) { let s = ''; for (const x of b) s += x.toString(16).padStart(2, '0'); return s; }
+/* Peak-to-trough size of the pulse wave in one reply: 95th minus 5th percentile, so a stray sample can't inflate it. */
+function waveAmp(w) {
+  if (!w || w.length < 30) return null;
+  const a = Array.from(w).sort((x, y) => x - y);
+  return a[Math.floor(a.length * .95)] - a[Math.floor(a.length * .05)];
+}
 
 /* Stitches notifications into whole reply frames using the length field. */
 const assembler = {
@@ -327,10 +333,11 @@ function parseFrame(f, cmd, crcOk) {
     const vitals = spo2 >= 1 && spo2 <= 100 && pr >= 1 && pr < 300;
     const worn = lead === 1 || vitals;
     const valid = worn && vitals;
-    const waveLen = p[10] | (p[11] << 8);
+    const waveLen = p[10] | (p[11] << 8), wv = p.subarray(12, 12 + waveLen);
     return { t, s: valid ? spo2 : null, h: valid ? pr : null, p: valid && p[5] > 0 ? p[5] : null,
              m: null, b: p[3], w: worn ? 1 : 0, c: worn && !vitals ? 1 : 0, k: 'rt',
-             x: toHex(f.subarray(0, 19)), wave: p.subarray(12, 12 + waveLen), crcOk };
+             a: valid ? waveAmp(wv) : null, v: toHex(wv),
+             x: toHex(f.subarray(0, 19)), wave: wv, crcOk };
   }
   const spo2 = p[0], hr = p[1];
   const vitals = spo2 >= 1 && spo2 <= 100 && hr >= 1 && hr < 255;
@@ -338,7 +345,7 @@ function parseFrame(f, cmd, crcOk) {
   const valid = worn && vitals;
   return { t, s: valid ? spo2 : null, h: valid ? hr : null, p: valid && p[10] > 0 ? p[10] : null,
            m: p[9], b: p[7], w: worn ? 1 : 0, c: worn && !vitals ? 1 : 0, k: 'legacy',
-           x: toHex(f.subarray(0, 20)), wave: null, crcOk };
+           a: null, v: '', x: toHex(f.subarray(0, 20)), wave: null, crcOk };
 }
 
 /* ---------- Small helpers ---------- */
@@ -422,20 +429,21 @@ function idbDeleteSession(sid) {
 let session = null;
 function newSession(device, demo) {
   session = { sid: 's' + Date.now(), start: Date.now(), end: Date.now(), device: device || '', demo: !!demo, n: 0, rows: [],
-              piN: 0, piSum: 0, piMin: Infinity, piMax: -Infinity };
+              piN: 0, piSum: 0, piMin: Infinity, piMax: -Infinity, ampN: 0, ampSum: 0, ampMin: Infinity, ampMax: -Infinity };
   if (!demo) saveMeta();
   updateStats(); drawChart(); setExportEnabled(false);
 }
 function saveMeta() {
   if (!session || session.demo) return;
-  const { sid, start, end, device, n, piN, piSum, piMin, piMax } = session;
-  idbPut('sessions', { sid, start, end, device, n, piN, piSum, piMin: isFinite(piMin) ? piMin : null, piMax: isFinite(piMax) ? piMax : null });
+  const { sid, start, end, device, n, piN, piSum, piMin, piMax, ampN, ampSum } = session;
+  idbPut('sessions', { sid, start, end, device, n, piN, piSum, piMin: isFinite(piMin) ? piMin : null, piMax: isFinite(piMax) ? piMax : null, ampN, ampSum });
 }
 function addReading(r) {
   if (!session) return;
-  const row = { t: r.t, s: r.s, h: r.h, p: r.p, m: r.m, b: r.b, w: r.w, c: r.c, k: r.k, x: r.x };
+  const row = { t: r.t, s: r.s, h: r.h, p: r.p, m: r.m, b: r.b, w: r.w, c: r.c, k: r.k, a: r.a, v: r.v, x: r.x };
   session.rows.push(row); session.n++; session.end = r.t;
   if (r.p != null) { session.piN++; session.piSum += r.p; session.piMin = Math.min(session.piMin, r.p); session.piMax = Math.max(session.piMax, r.p); }
+  if (r.a != null) { session.ampN++; session.ampSum += r.a; session.ampMin = Math.min(session.ampMin, r.a); session.ampMax = Math.max(session.ampMax, r.a); }
   if (!session.demo) {
     idbPut('rows', Object.assign({ sid: session.sid }, row));
     if (session.n % 15 === 1) saveMeta();
@@ -445,26 +453,34 @@ function addReading(r) {
 }
 
 /* ---------- Live display ---------- */
+/* When the device never sends PI but does send a pulse wave, the wave amplitude takes PI's place on screen. */
+function useAmp() { return !!session && session.piN === 0 && session.ampN > 0; }
 function showReading(r) {
+  const amp = useAmp();
   const piTxt = r.p == null ? '—' : fmtPI(r.p);
-  $('pi').textContent = piTxt;
-  $('piUnit').hidden = r.p == null || settings.piDiv !== 10;
-  $('piRaw').textContent = 'raw ' + (r.p == null ? '—' : r.p);
+  const bigTxt = amp ? (r.a ?? '—') : piTxt;
+  $('heroLabel').textContent = amp ? 'Pulse wave amplitude' : 'Perfusion index';
+  $('trendLabel').textContent = amp ? 'Wave amplitude this recording' : 'PI this recording';
+  $('pi').textContent = bigTxt;
+  $('piUnit').hidden = amp || r.p == null || settings.piDiv !== 10;
+  $('piRaw').textContent = amp ? 'PI not sent by this device' : 'raw ' + (r.p == null ? '—' : r.p);
   $('spo2').textContent = r.s ?? '—';
   $('hr').textContent = r.h ?? '—';
-  $('mot').textContent = r.m ?? '—';
-  $('motU').textContent = r.m == null ? 'not sent' : 'sensor';
+  if (r.k !== 'rt') { $('t3L').textContent = 'Motion'; $('mot').textContent = r.m ?? '—'; $('motU').textContent = 'sensor'; }
+  else if (amp) { $('t3L').textContent = 'PI'; $('mot').textContent = '—'; $('motU').textContent = 'not sent'; }
+  else { $('t3L').textContent = 'Wave amp'; $('mot').textContent = r.a ?? '—'; $('motU').textContent = 'raw units'; }
   $('bat').textContent = r.b;
   const f = $('finger');
   if (!r.w) { f.dataset.on = '0'; f.textContent = 'Off the finger'; }
   else if (r.c) { f.dataset.on = '0'; f.textContent = 'On finger, settling…'; }
-  else if (r.p == null) { f.dataset.on = '0'; f.textContent = 'On finger, but no PI in this reading'; }
+  else if (r.p == null && !amp) { f.dataset.on = '0'; f.textContent = 'On finger, but no PI in this reading'; }
   else { f.dataset.on = '1'; f.textContent = 'On finger · ' + stamp(r.t).slice(11); }
-  $('dimPi').textContent = r.p == null ? '—' : piTxt + (settings.piDiv === 10 ? ' %' : '');
+  $('dimPi').textContent = amp ? bigTxt : (r.p == null ? '—' : piTxt + (settings.piDiv === 10 ? ' %' : ''));
 }
 function updateStats() {
   const el = $('stats');
   if (!session || !session.n) { el.textContent = 'no readings yet'; return; }
+  if (useAmp()) { el.textContent = `avg ${(session.ampSum / session.ampN).toFixed(0)} · min ${session.ampMin} · max ${session.ampMax} · ${nf.format(session.n)} readings`; return; }
   if (!session.piN) { el.textContent = `${nf.format(session.n)} readings, none with PI yet`; return; }
   el.textContent = `avg ${fmtAvg(session.piSum, session.piN)} · min ${fmtPI(session.piMin)} · max ${fmtPI(session.piMax)} · ${nf.format(session.n)} readings`;
 }
@@ -505,10 +521,11 @@ function drawChart() {
   const cLine = css.getPropertyValue('--line').trim(), cMuted = css.getPropertyValue('--muted').trim(), cAcc = css.getPropertyValue('--accent').trim();
   const padL = 34, padR = 10, padT = 10, padB = 20, pw = W - padL - padR, ph = H - padT - padB;
   const rows = session ? session.rows : [];
-  const pts = rows.filter(r => r.p != null);
-  const div = settings.piDiv;
-  let top = 5 * div;
-  for (const r of pts) if (r.p > top) top = r.p;
+  const amp = useAmp(), key = amp ? 'a' : 'p';
+  const pts = rows.filter(r => r[key] != null);
+  const div = amp ? 1 : settings.piDiv;
+  let top = amp ? 20 : 5 * div;
+  for (const r of pts) if (r[key] > top) top = r[key];
   top *= 1.12;
   const ticks = niceTicks(top / div);
   top = ticks[ticks.length - 1] * div;
@@ -516,10 +533,10 @@ function drawChart() {
   for (const tv of ticks) {
     const y = padT + ph - (tv * div / top) * ph;
     g.strokeStyle = cLine; g.lineWidth = 1; g.beginPath(); g.moveTo(padL, y + .5); g.lineTo(W - padR, y + .5); g.stroke();
-    g.fillStyle = cMuted; g.fillText(div === 10 ? tv.toFixed(tv % 1 ? 1 : 0) : tv, padL - 6, y);
+    g.fillStyle = cMuted; g.fillText(div === 10 ? tv.toFixed(tv % 1 ? 1 : 0) : String(tv), padL - 6, y);
   }
   if (!session || pts.length < 2) {
-    g.textAlign = 'center'; g.fillStyle = cMuted; g.fillText('The PI trend appears here once readings arrive', padL + pw / 2, padT + ph / 2); return;
+    g.textAlign = 'center'; g.fillStyle = cMuted; g.fillText('The trend appears here once readings arrive', padL + pw / 2, padT + ph / 2); return;
   }
   const t0 = session.start, t1 = Math.max(session.end, t0 + 60000), span = t1 - t0;
   g.textAlign = 'left'; g.fillStyle = cMuted; g.textBaseline = 'alphabetic';
@@ -527,7 +544,7 @@ function drawChart() {
   g.textAlign = 'right'; g.fillText(stamp(t1).slice(11, 16), W - padR, H - 5);
   // Average into one bucket per pixel column; empty columns break the line.
   const cols = Math.max(1, Math.floor(pw)), sum = new Float64Array(cols), cnt = new Uint32Array(cols);
-  for (const r of pts) { const i = Math.min(cols - 1, Math.floor((r.t - t0) / span * cols)); sum[i] += r.p; cnt[i]++; }
+  for (const r of pts) { const i = Math.min(cols - 1, Math.floor((r.t - t0) / span * cols)); sum[i] += r[key]; cnt[i]++; }
   const gapCols = Math.max(2, Math.ceil(cols * (settings.pollMs * 4) / span));
   g.strokeStyle = cAcc; g.lineWidth = 1.6; g.lineJoin = 'round'; g.beginPath();
   let last = -1e9;
@@ -551,8 +568,8 @@ window.addEventListener('resize', () => { drawChartSoon(); drawWave(); });
 /* ---------- CSV export ---------- */
 function statusOf(r) { return !r.w ? 'off_finger' : r.c ? 'settling' : r.s == null ? 'no_reading' : 'ok'; }
 function toCSV(rows) {
-  const lines = ['time,spo2,pulse,pi_percent,pi_raw,motion,battery,on_finger,status,command,raw_hex'];
-  for (const r of rows) lines.push([stamp(r.t), r.s ?? '', r.h ?? '', fmtPI(r.p), r.p ?? '', r.m ?? '', r.b, r.w, statusOf(r), r.k || '', r.x].join(','));
+  const lines = ['time,spo2,pulse,pi_percent,pi_raw,wave_amp,motion,battery,on_finger,status,command,raw_hex,wave_hex'];
+  for (const r of rows) lines.push([stamp(r.t), r.s ?? '', r.h ?? '', fmtPI(r.p), r.p ?? '', r.a ?? '', r.m ?? '', r.b, r.w, statusOf(r), r.k || '', r.x, r.v || ''].join(','));
   return lines.join('\n') + '\n';
 }
 function fileName(start) { const s = stamp(start); return `oximeter-pi-${s.slice(0, 10)}_${s.slice(11, 13)}${s.slice(14, 16)}.csv`; }
@@ -591,7 +608,7 @@ async function renderSessions() {
     const live = session && session.sid === s.sid && running;
     li.innerHTML = `<div class="meta"><div class="when"></div><div class="sub"></div></div><div class="acts"></div>`;
     li.querySelector('.when').textContent = whenWords(s.start) + (live ? ' · recording' : '');
-    li.querySelector('.sub').textContent = `${durWords(s.end - s.start)} · ${nf.format(s.n)} readings · PI avg ${fmtAvg(s.piSum, s.piN)}`;
+    li.querySelector('.sub').textContent = `${durWords(s.end - s.start)} · ${nf.format(s.n)} readings · ` + (s.piN || !s.ampN ? `PI avg ${fmtAvg(s.piSum, s.piN)}` : `wave amp avg ${(s.ampSum / s.ampN).toFixed(0)}`);
     const acts = li.querySelector('.acts');
     const bSave = document.createElement('button'); bSave.className = 'small'; bSave.textContent = 'Save CSV';
     bSave.onclick = async () => saveCSV(await idbRows(s.sid), s.start);
@@ -724,7 +741,7 @@ function handleFrame({ f, crcOk }) {
   if (!r) return;
   if (r.error) { log('Device refused the request (' + r.error + ')'); if (cmd === CMD_RT && !readingsThisLink) fallBackToLegacy('0x1B refused'); return; }
   readingsThisLink++;
-  if (readingsThisLink === 1) log(`Reading: SpO2 ${r.s ?? '—'}, pulse ${r.h ?? '—'}, PI raw ${r.p ?? '—'}, ${r.w ? 'on finger' : 'off finger'}${r.wave ? `, ${r.wave.length} wave samples` : ''}`);
+  if (readingsThisLink === 1) log(`Reading: SpO2 ${r.s ?? '—'}, pulse ${r.h ?? '—'}, PI raw ${r.p ?? '—'}, ${r.w ? 'on finger' : 'off finger'}${r.wave ? `, ${r.wave.length} wave samples, amplitude ${r.a ?? '—'}` : ''}`);
   if (r.wave && r.wave.length) pushWave(r.wave);
   addReading(r);
 }
@@ -817,7 +834,7 @@ window.addEventListener('beforeunload', () => saveMeta());
 (async function init() {
   if (!navigator.bluetooth) { $('nobt').hidden = false; $('btnConnect').disabled = true; $('btnAll').disabled = true; }
   db = await idbOpen();
-  log(db ? 'Ready (v2). Recordings are saved on this phone.' : 'Ready (v2). This browser is not saving recordings.');
+  log(db ? 'Ready (v3). Recordings are saved on this phone.' : 'Ready (v3). This browser is not saving recordings.');
   renderSessions(); drawChart();
 })();
 </script>
